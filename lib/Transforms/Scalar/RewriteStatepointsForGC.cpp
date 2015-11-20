@@ -79,6 +79,101 @@ static cl::opt<bool>
                                    cl::Hidden, cl::init(true));
 
 namespace {
+
+  struct UnwindDestinationInfo {
+    UnwindDestinationInfo() : EHPad(nullptr) { }
+    UnwindDestinationInfo(BasicBlock *PadBlock) {
+      reset(PadBlock);
+    }
+
+    bool operator==(const UnwindDestinationInfo &O) const {
+      return (EHPad == O.EHPad);
+    }
+
+    bool operator!=(const UnwindDestinationInfo &O) const {
+      return !operator==(O);
+    }
+
+    void reset(BasicBlock *PadBlock);
+
+    Instruction *getEHPad() { return EHPad; }
+    BasicBlock *getSplittablePadEntry();
+
+  private:
+    Instruction *EHPad;
+  };
+
+  class UnwindDestinationIterator {
+    UnwindDestinationIterator() { }
+    UnwindDestinationIterator(InvokeInst *Safepoint) :
+      Info(Safepoint->getUnwindDest()) { }
+
+  public:
+    static iterator_range<UnwindDestinationIterator>
+    range(InvokeInst *Safepoint) {
+      return make_range(UnwindDestinationIterator(), UnwindDestinationIterator(Safepoint));
+    }
+
+    // Iterator methods.
+    bool operator==(const UnwindDestinationIterator &O) const {
+      return (Info == O.Info);
+    }
+
+    bool operator!=(const UnwindDestinationIterator &O) const {
+      return !operator==(O);
+    }
+    UnwindDestinationInfo &operator*() { return Info; }
+    UnwindDestinationInfo *operator->() { return &Info; }
+    UnwindDestinationIterator &operator++();
+
+  private:
+    UnwindDestinationInfo Info;
+  };
+
+} // end anonymous namespace
+
+void UnwindDestinationInfo::reset(BasicBlock *PadBlock) {
+  assert(!PadBlock || PadBlock->isEHPad());
+  while (PadBlock) {
+    Instruction *PadInst = PadBlock->getFirstNonPHI();
+    if (auto *EndPad = dyn_cast<CatchEndPadInst>(PadInst)) {
+      PadBlock = EndPad->getUnwindDest();
+    } else if (auto *EndPad = dyn_cast<CleanupEndPadInst>(PadInst)) {
+      PadBlock = EndPad->getUnwindDest();
+    } else if (auto *TermPad = dyn_cast<TerminatePadInst>(PadInst)) {
+      PadBlock = TermPad->getUnwindDest();
+    } else {
+      break;
+    }
+  }
+
+  EHPad = PadBlock ? PadBlock->getFirstNonPHI() : nullptr;
+}
+
+BasicBlock *UnwindDestinationInfo::getSplittablePadEntry() {
+  if (!EHPad)
+    return nullptr;
+
+  if (auto *CP = dyn_cast<CatchPadInst>(EHPad)) {
+    return CP->getNormalDest();
+  }
+  assert(isa<CleanupPadInst>(EHPad) || isa<LandingPadInst>(EHPad));
+  return EHPad->getParent();
+}
+
+UnwindDestinationIterator &UnwindDestinationIterator::operator++() {
+  BasicBlock *UnwindDest;
+  if (auto *CP = dyn_cast<CatchPadInst>(Info.getEHPad())) {
+    UnwindDest = CP->getUnwindDest();
+  } else {
+    assert(isa<CleanupPadInst>(Info.getEHPad()) || isa<LandingPadInst>(Info.getEHPad()));
+    UnwindDest = nullptr;
+  }
+  Info.reset(UnwindDest);
+  return *this;
+}
+
+namespace {
 struct RewriteStatepointsForGC : public ModulePass {
   static char ID; // Pass identification, replacement for typeid
 
