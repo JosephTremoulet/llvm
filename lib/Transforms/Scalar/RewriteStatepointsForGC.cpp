@@ -656,14 +656,11 @@ static BaseDefiningValueResult findBaseDefiningValue(Value *I) {
 
   if (IntrinsicInst *II = dyn_cast<IntrinsicInst>(I)) {
     switch (II->getIntrinsicID()) {
-    case Intrinsic::experimental_gc_result_ptr:
     default:
       // fall through to general call handling
       break;
     case Intrinsic::experimental_gc_statepoint:
-    case Intrinsic::experimental_gc_result_float:
-    case Intrinsic::experimental_gc_result_int:
-      llvm_unreachable("these don't produce pointers");
+      llvm_unreachable("this doesn't produce a pointer");
     case Intrinsic::experimental_gc_relocate: {
       // Rerunning safepoint insertion after safepoints are already
       // inserted is not supported.  It could probably be made to work,
