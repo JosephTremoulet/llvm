@@ -35,6 +35,7 @@ class ConstantInt;
 class ConstantRange;
 class DataLayout;
 class LLVMContext;
+template <bool> class UnwindDestIterator;
 
 enum AtomicOrdering {
   NotAtomic = 0,
@@ -3706,8 +3707,12 @@ public:
   void setNormalDest(BasicBlock *B) {
     Op<-2>() = reinterpret_cast<Value*>(B);
   }
-  void setUnwindDest(BasicBlock *B) {
-    Op<-1>() = reinterpret_cast<Value*>(B);
+  void setUnwindDest(BasicBlock *B) { Op<-1>() = reinterpret_cast<Value *>(B); }
+
+  template <bool SkipUnsplittable = true>
+  iterator_range<UnwindDestIterator<SkipUnsplittable>>
+  getTransitiveUnwindDests() const {
+    return UnwindDestIterator<SkipUnsplittable>::range(getUnwindDest());
   }
 
   /// getLandingPadInst - Get the landingpad instruction from the landing pad
@@ -3913,6 +3918,12 @@ public:
     assert(UnwindDest);
     assert(hasUnwindDest());
     setOperand(1, UnwindDest);
+  }
+
+  template <bool SkipUnsplittable = true>
+  iterator_range<UnwindDestIterator<SkipUnsplittable>>
+  getTransitiveUnwindDests() const {
+    return UnwindDestIterator<SkipUnsplittable>::range(getUnwindDest());
   }
 
   /// getNumHandlers - return the number of 'handlers' in this catchswitch
@@ -4240,6 +4251,12 @@ public:
     assert(NewDest);
     assert(hasUnwindDest());
     Op<1>() = NewDest;
+  }
+
+  template <bool SkipUnsplittable = true>
+  iterator_range<UnwindDestIterator<SkipUnsplittable>>
+  getTransitiveUnwindDests() const {
+    return UnwindDestIterator<SkipUnsplittable>::range(getUnwindDest());
   }
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -4817,6 +4834,72 @@ public:
   }
   static inline bool classof(const Value *V) {
     return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+// TODO: Figure out where this should live
+template <bool SkipUnsplittable> class UnwindDestIterator {
+public:
+  BasicBlock *operator*() { return CurrentInstr->getParent(); }
+  UnwindDestIterator &operator++() {
+    if (CurrentHandler) {
+      CatchSwitchInst *CatchSwitch =
+          cast<CatchPadInst>(CurrentInstr)->getCatchSwitch();
+      if (++(*CurrentHandler) != CatchSwitch->handler_end()) {
+        CurrentInstr = (**CurrentHandler)->getFirstNonPHI();
+        return *this;
+      }
+      CurrentHandler.reset();
+      visitUnwindDest(CatchSwitch->getUnwindDest());
+      return *this;
+    }
+    if (auto *CatchSwitch = dyn_cast<CatchSwitchInst>(CurrentInstr)) {
+      visitFirstHandler(CatchSwitch);
+      return *this;
+    }
+    CurrentInstr = nullptr;
+    return *this;
+  }
+  bool operator==(const UnwindDestIterator &Other) const {
+    if (CurrentInstr != Other.CurrentInstr)
+      return false;
+    if (CurrentHandler.hasValue() != Other.CurrentHandler.hasValue())
+      return false;
+    if (CurrentHandler &&
+        (CurrentHandler.getValue() != Other.CurrentHandler.getValue()))
+      return false;
+    return true;
+  }
+  bool operator!=(const UnwindDestIterator &Other) const {
+    return !operator==(Other);
+  }
+  static iterator_range<UnwindDestIterator> range(BasicBlock *UnwindDest) {
+    return iterator_range<UnwindDestIterator>(UnwindDestIterator(UnwindDest),
+                                              UnwindDestIterator());
+  }
+
+private:
+  explicit UnwindDestIterator() {}
+  explicit UnwindDestIterator(BasicBlock *UnwindDest) {
+    visitUnwindDest(UnwindDest);
+  }
+  Instruction *CurrentInstr = nullptr;
+  llvm::Optional<CatchSwitchInst::handler_iterator> CurrentHandler;
+
+  void visitUnwindDest(BasicBlock *UnwindDest) {
+    assert(!CurrentHandler);
+    if (!UnwindDest) {
+      CurrentInstr = nullptr;
+      return;
+    }
+    CurrentInstr = UnwindDest->getFirstNonPHI();
+    if (SkipUnsplittable)
+      if (auto *CatchSwitch = dyn_cast<CatchSwitchInst>(CurrentInstr))
+        visitFirstHandler(CatchSwitch);
+  }
+  void visitFirstHandler(CatchSwitchInst *CatchSwitch) {
+    CurrentHandler = CatchSwitch->handler_begin();
+    CurrentInstr = (**CurrentHandler)->getFirstNonPHI();
   }
 };
 
