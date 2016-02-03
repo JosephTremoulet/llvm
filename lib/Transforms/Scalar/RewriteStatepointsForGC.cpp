@@ -169,17 +169,19 @@ struct GCPtrLivenessData {
 // Generally, after the execution of a full findBasePointer call, only the
 // base relation will remain.  Internally, we add a mixture of the two
 // types, then update all the second type to the first type
+typedef DenseMap<Value *, Value *> BaseMapTy;
 typedef DenseMap<Value *, Value *> DefiningValueMapTy;
 typedef DenseSet<Value *> StatepointLiveSetTy;
 typedef DenseMap<AssertingVH<Instruction>, AssertingVH<Value>>
   RematerializedValueMapTy;
+typedef DenseMap<Instruction *, BaseMapTy *> BaseMapMapTy;
 
 struct PartiallyConstructedSafepointRecord {
   /// The set of values known to be live across this safepoint
   StatepointLiveSetTy LiveSet;
 
   /// Mapping from live pointers to a base-defining-value
-  DenseMap<Value *, Value *> PointerToBase;
+  BaseMapTy PointerToBase;
 
   /// The *new* gc.statepoint instruction itself.  This produces the token
   /// that normal path gc.relocates and the gc.result are tied to.
@@ -211,12 +213,15 @@ static ArrayRef<Use> GetDeoptBundleOperands(ImmutableCallSite CS) {
 
 /// Compute the live-in set for every basic block in the function
 static void computeLiveInValues(DominatorTree &DT, Function &F,
-                                GCPtrLivenessData &Data);
+                                GCPtrLivenessData &Data,
+                                const BaseMapMapTy *BaseMaps = nullptr);
 
 /// Given results from the dataflow liveness computation, find the set of live
 /// Values at a particular instruction.
-static void findLiveSetAtInst(Instruction *inst, GCPtrLivenessData &Data,
-                              StatepointLiveSetTy &out);
+static void findLiveSetAtStatepoint(CallSite Statepoint,
+                                    GCPtrLivenessData &Data,
+                                    const BaseMapMapTy *BaseMaps,
+                                    StatepointLiveSetTy &out);
 
 // TODO: Once we can get to the GCStrategy, this becomes
 // Optional<bool> isGCManagedPointer(const Type *Ty) const override {
@@ -291,16 +296,17 @@ static std::string suffixed_name_or(Value *V, StringRef Suffix,
 }
 
 // Conservatively identifies any definitions which might be live at the
-// given instruction. The  analysis is performed immediately before the
-// given instruction. Values defined by that instruction are not considered
-// live.  Values used by that instruction are considered live.
+// given instruction. Deopt arguments are treated specially, and considered
+// live at the given parse point even though they appear in its argument
+// list, to ensure they are reported/relocated.
 static void analyzeParsePointLiveness(
     DominatorTree &DT, GCPtrLivenessData &OriginalLivenessData,
     const CallSite &CS, PartiallyConstructedSafepointRecord &result) {
-  Instruction *inst = CS.getInstruction();
 
   StatepointLiveSetTy LiveSet;
-  findLiveSetAtInst(inst, OriginalLivenessData, LiveSet);
+  assert(result.PointerToBase.empty() &&
+         "Not expecting bases to be computed yet");
+  findLiveSetAtStatepoint(CS, OriginalLivenessData, nullptr, LiveSet);
 
   if (PrintLiveSet) {
     // Note: This output is used by several of the test cases
@@ -1191,8 +1197,9 @@ static void findBasePointers(DominatorTree &DT, DefiningValueMapTy &DVCache,
 /// Given an updated version of the dataflow liveness results, update the
 /// liveset and base pointer maps for the call site CS.
 static void recomputeLiveInValues(GCPtrLivenessData &RevisedLivenessData,
+                                  const BaseMapMapTy &BaseMaps,
                                   const CallSite &CS,
-                                  PartiallyConstructedSafepointRecord &result);
+                                  PartiallyConstructedSafepointRecord &Info);
 
 static void recomputeLiveInValues(
     Function &F, DominatorTree &DT, ArrayRef<CallSite> toUpdate,
@@ -1200,11 +1207,21 @@ static void recomputeLiveInValues(
   // TODO-PERF: reuse the original liveness, then simply run the dataflow
   // again.  The old values are still live and will help it stabilize quickly.
   GCPtrLivenessData RevisedLivenessData;
-  computeLiveInValues(DT, F, RevisedLivenessData);
+  // The liveness walk needs to recognize when it visits a statepoint, and
+  // add to the live gens the base pointers of any derived pointers which
+  // are live across said statepoint.  Pass it a map it can use to detect
+  // and compute this, whose keys are the statepoint instructions and
+  // whose values point to their PointerToBase maps.
+  BaseMapMapTy BaseMaps;
+  for (size_t I = 0; I < records.size(); I++) {
+    Instruction *Statepoint = toUpdate[I].getInstruction();
+    BaseMaps[Statepoint] = &records[I].PointerToBase;
+  }
+  computeLiveInValues(DT, F, RevisedLivenessData, &BaseMaps);
   for (size_t i = 0; i < records.size(); i++) {
     struct PartiallyConstructedSafepointRecord &info = records[i];
     const CallSite &CS = toUpdate[i];
-    recomputeLiveInValues(RevisedLivenessData, CS, info);
+    recomputeLiveInValues(RevisedLivenessData, BaseMaps, CS, info);
   }
 }
 
@@ -1841,33 +1858,6 @@ template <typename T> static void unique_unsorted(SmallVectorImpl<T> &Vec) {
             }), Vec.end());
 }
 
-/// Insert holders so that each Value is obviously live through the entire
-/// lifetime of the call.
-static void insertUseHolderAfter(CallSite &CS, const ArrayRef<Value *> Values,
-                                 SmallVectorImpl<CallInst *> &Holders) {
-  if (Values.empty())
-    // No values to hold live, might as well not insert the empty holder
-    return;
-
-  Module *M = CS.getInstruction()->getModule();
-  // Use a dummy vararg function to actually hold the values live
-  Function *Func = cast<Function>(M->getOrInsertFunction(
-      "__tmp_use", FunctionType::get(Type::getVoidTy(M->getContext()), true)));
-  if (CS.isCall()) {
-    // For call safepoints insert dummy calls right after safepoint
-    Holders.push_back(CallInst::Create(Func, Values, "",
-                                       &*++CS.getInstruction()->getIterator()));
-    return;
-  }
-  // For invoke safepooints insert dummy calls both in normal and
-  // exceptional destination blocks
-  auto *II = cast<InvokeInst>(CS.getInstruction());
-  Holders.push_back(CallInst::Create(
-      Func, Values, "", &*II->getNormalDest()->getFirstInsertionPt()));
-  Holders.push_back(CallInst::Create(
-      Func, Values, "", &*II->getUnwindDest()->getFirstInsertionPt()));
-}
-
 static void findLiveReferences(
     Function &F, DominatorTree &DT, ArrayRef<CallSite> toUpdate,
     MutableArrayRef<struct PartiallyConstructedSafepointRecord> records) {
@@ -2229,27 +2219,6 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
     normalizeForInvokeSafepoint(II->getUnwindDest(), II->getParent(), DT);
   }
 
-  // A list of dummy calls added to the IR to keep various values obviously
-  // live in the IR.  We'll remove all of these when done.
-  SmallVector<CallInst *, 64> Holders;
-
-  // Insert a dummy call with all of the arguments to the vm_state we'll need
-  // for the actual safepoint insertion.  This ensures reference arguments in
-  // the deopt argument list are considered live through the safepoint (and
-  // thus makes sure they get relocated.)
-  for (CallSite CS : ToUpdate) {
-    SmallVector<Value *, 64> DeoptValues;
-
-    for (Value *Arg : GetDeoptBundleOperands(CS)) {
-      assert(!isUnhandledGCPointerType(Arg->getType()) &&
-             "support for FCA unimplemented");
-      if (isHandledGCPointerType(Arg->getType()))
-        DeoptValues.push_back(Arg);
-    }
-
-    insertUseHolderAfter(CS, DeoptValues, Holders);
-  }
-
   SmallVector<PartiallyConstructedSafepointRecord, 64> Records(ToUpdate.size());
 
   // A) Identify all gc pointers which are statically live at the given call
@@ -2269,7 +2238,8 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
     }
   } // end of cache scope
 
-  // The base phi insertion logic (for any safepoint) may have inserted new
+  // By selecting base pointers, we've effectively inserted new uses, because
+  // the base phi insertion logic (for any safepoint) may have inserted new
   // instructions which are now live at some safepoint.  The simplest such
   // example is:
   // loop:
@@ -2278,24 +2248,8 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
   //   gep a + 1
   //   safepoint 2
   //   br loop
-  // We insert some dummy calls after each safepoint to definitely hold live
-  // the base pointers which were identified for that safepoint.  We'll then
-  // ask liveness for _every_ base inserted to see what is now live.  Then we
-  // remove the dummy calls.
-  Holders.reserve(Holders.size() + Records.size());
-  for (size_t i = 0; i < Records.size(); i++) {
-    PartiallyConstructedSafepointRecord &Info = Records[i];
-
-    SmallVector<Value *, 128> Bases;
-    for (auto Pair : Info.PointerToBase)
-      Bases.push_back(Pair.second);
-
-    insertUseHolderAfter(ToUpdate[i], Bases, Holders);
-  }
-
-  // By selecting base pointers, we've effectively inserted new uses. Thus, we
-  // need to rerun liveness.  We may *also* have inserted new defs, but that's
-  // not the key issue.
+  // Thus, we need to rerun liveness.  We may *also* have inserted new defs,
+  // but that's not the key issue.
   recomputeLiveInValues(F, DT, ToUpdate, Records);
 
   if (PrintBasePointers) {
@@ -2323,11 +2277,6 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
     for (auto &BasePair : Info.PointerToBase)
       if (isa<Constant>(BasePair.second))
         Info.LiveSet.erase(BasePair.first);
-
-  for (CallInst *CI : Holders)
-    CI->eraseFromParent();
-
-  Holders.clear();
 
   // Do a limited scalarization of any live at safepoint vector values which
   // contain pointers.  This enables this pass to run after vectorization at
@@ -2624,11 +2573,18 @@ bool RewriteStatepointsForGC::runOnFunction(Function &F) {
 // TODO: Consider using bitvectors for liveness, the set of potentially
 // interesting values should be small and easy to pre-compute.
 
+/// Add the base pointers from the given base map to the given live set.
+static void insertBases(BaseMapTy &BaseMap, StatepointLiveSetTy &LiveSet) {
+  for (auto &Pair : BaseMap)
+    LiveSet.insert(Pair.second);
+}
+
 /// Compute the live-in set for the location rbegin starting from
 /// the live-out set of the basic block
 static void computeLiveInValues(BasicBlock::reverse_iterator rbegin,
                                 BasicBlock::reverse_iterator rend,
-                                DenseSet<Value *> &LiveTmp) {
+                                const BaseMapMapTy *BaseMaps,
+                                StatepointLiveSetTy &LiveTmp) {
 
   for (BasicBlock::reverse_iterator ritr = rbegin; ritr != rend; ritr++) {
     Instruction *I = &*ritr;
@@ -2658,6 +2614,14 @@ static void computeLiveInValues(BasicBlock::reverse_iterator rbegin,
         // contain just about anything.  (see constants.ll in tests)
         LiveTmp.insert(V);
       }
+    }
+
+    // If we've computed live references and the current instruction happens
+    // to be a statepoint, add its bases to the live set.
+    if (BaseMaps && CallSite(I)) {
+      auto BaseMapIter = BaseMaps->find(I);
+      if (BaseMapIter != BaseMaps->end())
+        insertBases(*BaseMapIter->second, LiveTmp);
     }
   }
 }
@@ -2716,7 +2680,8 @@ static void checkBasicSSA(DominatorTree &DT, GCPtrLivenessData &Data,
 #endif
 
 static void computeLiveInValues(DominatorTree &DT, Function &F,
-                                GCPtrLivenessData &Data) {
+                                GCPtrLivenessData &Data,
+                                const BaseMapMapTy *BaseMaps) {
 
   SmallSetVector<BasicBlock *, 32> Worklist;
   auto AddPredsToWorklist = [&](BasicBlock *BB) {
@@ -2733,7 +2698,7 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
   for (BasicBlock &BB : F) {
     Data.KillSet[&BB] = computeKillSet(&BB);
     Data.LiveSet[&BB].clear();
-    computeLiveInValues(BB.rbegin(), BB.rend(), Data.LiveSet[&BB]);
+    computeLiveInValues(BB.rbegin(), BB.rend(), BaseMaps, Data.LiveSet[&BB]);
 
 #ifndef NDEBUG
     for (Value *Kill : Data.KillSet[&BB])
@@ -2793,31 +2758,47 @@ static void computeLiveInValues(DominatorTree &DT, Function &F,
 #endif
 }
 
-static void findLiveSetAtInst(Instruction *Inst, GCPtrLivenessData &Data,
-                              StatepointLiveSetTy &Out) {
-
+static void findLiveSetAtStatepoint(CallSite Statepoint,
+                                    GCPtrLivenessData &Data,
+                                    const BaseMapMapTy *BaseMaps,
+                                    StatepointLiveSetTy &Out) {
+  Instruction *Inst = Statepoint.getInstruction();
   BasicBlock *BB = Inst->getParent();
 
   // Note: The copy is intentional and required
   assert(Data.LiveOut.count(BB));
   DenseSet<Value *> LiveOut = Data.LiveOut[BB];
 
-  // We want to handle the statepoint itself oddly.  It's
-  // call result is not live (normal), nor are it's arguments
-  // (unless they're used again later).  This adjustment is
-  // specifically what we need to relocate
+  // We want to handle the statepoint itself oddly.  Its
+  // call result is not live (normal), nor are its non-deopt
+  // arguments (unless they're used again later).  This
+  // adjustment is specifically what we need to relocate.
   BasicBlock::reverse_iterator rend(Inst->getIterator());
-  computeLiveInValues(BB->rbegin(), rend, LiveOut);
+  computeLiveInValues(BB->rbegin(), rend, BaseMaps, LiveOut);
   LiveOut.erase(Inst);
   Out.insert(LiveOut.begin(), LiveOut.end());
+
+  // Ensure reference arguments in the deopt argument list are considered live
+  // through the safepoint (and thus make sure they get relocated.)
+  for (Value *Arg : GetDeoptBundleOperands(Statepoint)) {
+    assert(!isUnhandledGCPointerType(Arg->getType()) &&
+           "support for FCA unimplemented");
+    if (isHandledGCPointerType(Arg->getType()))
+      Out.insert(Arg);
+  }
+
+  // Likewise ensure that bases of derived pointers live through
+  // the statepoint are considered live through it as well.
+  if (BaseMaps)
+    insertBases(*BaseMaps->lookup(Inst), Out);
 }
 
 static void recomputeLiveInValues(GCPtrLivenessData &RevisedLivenessData,
+                                  const BaseMapMapTy &BaseMaps,
                                   const CallSite &CS,
                                   PartiallyConstructedSafepointRecord &Info) {
-  Instruction *Inst = CS.getInstruction();
   StatepointLiveSetTy Updated;
-  findLiveSetAtInst(Inst, RevisedLivenessData, Updated);
+  findLiveSetAtStatepoint(CS, RevisedLivenessData, &BaseMaps, Updated);
 
 #ifndef NDEBUG
   DenseSet<Value *> Bases;
