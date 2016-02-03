@@ -164,7 +164,7 @@ struct GCPtrLivenessData {
 typedef DenseMap<Value *, Value *> DefiningValueMapTy;
 typedef DenseSet<Value *> StatepointLiveSetTy;
 typedef DenseMap<AssertingVH<Instruction>, AssertingVH<Value>>
-  RematerializedValueMapTy;
+    ReconstitutedValueMapTy;
 
 struct PartiallyConstructedSafepointRecord {
   /// The set of values known to be live across this safepoint
@@ -183,8 +183,8 @@ struct PartiallyConstructedSafepointRecord {
 
   /// Record live values we are rematerialized instead of relocating.
   /// They are not included into 'LiveSet' field.
-  /// Maps rematerialized copy to it's original value.
-  RematerializedValueMapTy RematerializedValues;
+  /// Maps rematerialized copy to its original value.
+  ReconstitutedValueMapTy RematerializedValues;
 };
 }
 
@@ -1549,22 +1549,22 @@ insertRelocationStores(iterator_range<Value::user_iterator> GCRelocs,
 }
 
 // Helper function for the "relocationViaAlloca". Similar to the
-// "insertRelocationStores" but works for rematerialized values.
-static void insertRematerializationStores(
-    const RematerializedValueMapTy &RematerializedValues,
-    DenseMap<Value *, Value *> &AllocaMap,
-    DenseSet<Value *> &VisitedLiveValues) {
+// "insertRelocationStores" but works for reconstituted values.
+static void
+insertReconstitutionStores(const ReconstitutedValueMapTy &ReconstitutedValues,
+                           DenseMap<Value *, Value *> &AllocaMap,
+                           DenseSet<Value *> &VisitedLiveValues) {
 
-  for (auto RematerializedValuePair: RematerializedValues) {
-    Instruction *RematerializedValue = RematerializedValuePair.first;
-    Value *OriginalValue = RematerializedValuePair.second;
+  for (auto ReconstitutedValuePair : ReconstitutedValues) {
+    Instruction *ReconstitutedValue = ReconstitutedValuePair.first;
+    Value *OriginalValue = ReconstitutedValuePair.second;
 
     assert(AllocaMap.count(OriginalValue) &&
-           "Can not find alloca for rematerialized value");
+           "Can not find alloca for reconstituted value");
     Value *Alloca = AllocaMap[OriginalValue];
 
-    StoreInst *Store = new StoreInst(RematerializedValue, Alloca);
-    Store->insertAfter(RematerializedValue);
+    StoreInst *Store = new StoreInst(ReconstitutedValue, Alloca);
+    Store->insertAfter(ReconstitutedValue);
 
 #ifndef NDEBUG
     VisitedLiveValues.insert(OriginalValue);
@@ -1643,8 +1643,8 @@ static void relocationViaAlloca(
     }
 
     // Do similar thing with rematerialized values
-    insertRematerializationStores(Info.RematerializedValues, AllocaMap,
-                                  VisitedLiveValues);
+    insertReconstitutionStores(Info.RematerializedValues, AllocaMap,
+                               VisitedLiveValues);
 
     if (ClobberNonLive) {
       // As a debugging aid, pretend that an unrelocated pointer becomes null at
