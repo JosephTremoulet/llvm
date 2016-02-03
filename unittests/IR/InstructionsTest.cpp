@@ -168,6 +168,86 @@ TEST(InstructionsTest, BranchInst) {
   delete bb1;
 }
 
+template <typename ItRange>
+static void checkBlockIteration(ArrayRef<BasicBlock *> Expected,
+                                ItRange Range) {
+  auto Begin = Range.begin(), End = Range.end();
+  size_t I = 0;
+  for (auto Iter = Begin; Iter != End; ++Iter)
+    EXPECT_EQ(Expected[I++], *Iter);
+  EXPECT_EQ(Expected.size(), I);
+};
+
+TEST(InstructionsTest, UnwindDestIterator) {
+  LLVMContext &C(getGlobalContext());
+
+  // Make BasicBlocks to model exceptional flow.
+  std::unique_ptr<BasicBlock> SwitchBlock1(BasicBlock::Create(C));
+  std::unique_ptr<BasicBlock> SwitchBlock2(BasicBlock::Create(C));
+  std::unique_ptr<BasicBlock> CatchBlock1(BasicBlock::Create(C));
+  std::unique_ptr<BasicBlock> CatchBlock2(BasicBlock::Create(C));
+  std::unique_ptr<BasicBlock> CatchBlock3(BasicBlock::Create(C));
+  std::unique_ptr<BasicBlock> CleanupBlock(BasicBlock::Create(C));
+
+  // Generate EH pads in the BasicBlocks.
+  auto *NoToken = ConstantTokenNone::get(C);
+  auto *Switch1 = CatchSwitchInst::Create(NoToken, SwitchBlock2.get(), 1,
+                                          "switch1", SwitchBlock1.get());
+  auto *Switch2 = CatchSwitchInst::Create(NoToken, CleanupBlock.get(), 2,
+                                          "switch2", SwitchBlock2.get());
+  CleanupPadInst::Create(NoToken, {}, "cleanup", CleanupBlock.get());
+  CatchPadInst::Create(Switch1, {}, "catch1", CatchBlock1.get());
+  CatchPadInst::Create(Switch2, {}, "catch2", CatchBlock2.get());
+  CatchPadInst::Create(Switch2, {}, "catch3", CatchBlock3.get());
+
+  // Hook up the handlers to the switches.
+  Switch1->addHandler(CatchBlock1.get());
+  Switch2->addHandler(CatchBlock2.get());
+  Switch2->addHandler(CatchBlock3.get());
+
+  // Note the expected visit order with and without visiting unsplittable
+  // blocks.
+  BasicBlock *SplittableDests[] = {CatchBlock1.get(), CatchBlock2.get(),
+                                   CatchBlock3.get(), CleanupBlock.get()};
+  BasicBlock *AllDests[] = {SwitchBlock1.get(), CatchBlock1.get(),
+                            SwitchBlock2.get(), CatchBlock2.get(),
+                            CatchBlock3.get(),  CleanupBlock.get()};
+
+  // Give all the blocks terminators to make them well-formed.
+  for (BasicBlock *Block : SplittableDests)
+    new UnreachableInst(C, Block);
+
+  // Create and test an invoke.
+  auto *FnTy = FunctionType::get(Type::getVoidTy(C), false);
+  auto *FnPtr = ConstantPointerNull::get(FnTy->getPointerTo());
+  std::unique_ptr<BasicBlock> NormalDest(BasicBlock::Create(C));
+  std::unique_ptr<InvokeInst> Invoke(InvokeInst::Create(
+      FnTy, FnPtr, NormalDest.get(), SwitchBlock1.get(), {}));
+  checkBlockIteration(SplittableDests, Invoke->getTransitiveUnwindDests());
+  checkBlockIteration(AllDests, Invoke->getTransitiveUnwindDests<false>());
+
+  // Create and test a cleanupret.
+  std::unique_ptr<CleanupPadInst> DummyPad(CleanupPadInst::Create(NoToken, {}));
+  std::unique_ptr<CleanupReturnInst> CleanupRet(
+      CleanupReturnInst::Create(DummyPad.get(), SwitchBlock1.get()));
+  checkBlockIteration(SplittableDests, CleanupRet->getTransitiveUnwindDests());
+  checkBlockIteration(AllDests, CleanupRet->getTransitiveUnwindDests<false>());
+
+  // Create and test a catchswitch.
+  std::unique_ptr<CatchSwitchInst> TestSwitch(
+      CatchSwitchInst::Create(NoToken, SwitchBlock1.get(), 1));
+  std::unique_ptr<BasicBlock> TestCatchBlock(BasicBlock::Create(C));
+  CatchPadInst::Create(TestSwitch.get(), {}, "testcatch", TestCatchBlock.get());
+  TestSwitch->addHandler(TestCatchBlock.get());
+  checkBlockIteration(SplittableDests, TestSwitch->getTransitiveUnwindDests());
+  checkBlockIteration(AllDests, TestSwitch->getTransitiveUnwindDests<false>());
+
+  // Break reference cycles before deleting IR.
+  for (auto *Block : AllDests)
+    Block->dropAllReferences();
+  TestSwitch->dropAllReferences();
+}
+
 TEST(InstructionsTest, CastInst) {
   LLVMContext &C(getGlobalContext());
 
