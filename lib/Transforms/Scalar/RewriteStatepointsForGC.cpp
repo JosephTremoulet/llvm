@@ -72,6 +72,11 @@ static cl::opt<bool, true> ClobberNonLiveOverride("rs4gc-clobber-non-live",
                                                   cl::location(ClobberNonLive),
                                                   cl::Hidden);
 
+static cl::opt<bool> SpillOnExceptionPath("rs4gc-spill-on-exception-path",
+                                          cl::Hidden, cl::init(false));
+static cl::opt<bool> SpillOnNormalPath("rs4gc-spill-on-normal-path", cl::Hidden,
+                                       cl::init(false));
+
 static cl::opt<bool>
     AllowStatepointWithNoDeoptInfo("rs4gc-allow-statepoint-with-no-deopt-info",
                                    cl::Hidden, cl::init(true));
@@ -173,7 +178,7 @@ typedef DenseMap<Value *, Value *> BaseMapTy;
 typedef DenseMap<Value *, Value *> DefiningValueMapTy;
 typedef DenseSet<Value *> StatepointLiveSetTy;
 typedef DenseMap<AssertingVH<Instruction>, AssertingVH<Value>>
-  RematerializedValueMapTy;
+    ReconstitutedValueMapTy;
 typedef DenseMap<Instruction *, BaseMapTy *> BaseMapMapTy;
 
 struct PartiallyConstructedSafepointRecord {
@@ -193,8 +198,17 @@ struct PartiallyConstructedSafepointRecord {
 
   /// Record live values we are rematerialized instead of relocating.
   /// They are not included into 'LiveSet' field.
-  /// Maps rematerialized copy to it's original value.
-  RematerializedValueMapTy RematerializedValues;
+  /// Maps rematerialized copy to its original value.
+  ReconstitutedValueMapTy RematerializedValues;
+
+  /// Record fills where we spilled a live value instead of relocating.
+  /// They are not included into 'LiveSet' field.
+  /// Maps loaded copy to its original value.
+  ReconstitutedValueMapTy ReloadedValues;
+
+  /// Record spill slots holding live values spilled across this statepoint.
+  /// These need to be reported to the GC for relocation.
+  SmallVector<Value *, 16> SpillSlots;
 };
 }
 
@@ -1387,6 +1401,92 @@ public:
 };
 }
 
+// Generate spill slots for values that get spilled rather than
+// relocated/rematerialized.
+typedef DenseMap<Value *, AllocaInst *> SpillMapTy;
+static void StabilizeOrder(SmallVectorImpl<Value *> &LiveVec);
+static void generateSpills(SpillMapTy &SpillMap, CallSite CS,
+                           PartiallyConstructedSafepointRecord &Record) {
+  assert(SpillOnNormalPath || SpillOnExceptionPath);
+
+  // Calls have no exception path.
+  if (CS.isCall() && !SpillOnNormalPath)
+    return;
+
+  Function *F = CS.getInstruction()->getParent()->getParent();
+  Instruction *AllocaInsertBefore = &F->getEntryBlock().front();
+
+  // Copy the live set to a vector for "determinism" (see FIXME at
+  // StabilizeOrder).
+  // Convert to vector for efficient cross referencing.
+  SmallVector<Value *, 64> LiveVec;
+  LiveVec.reserve(Record.LiveSet.size());
+  LiveVec.append(Record.LiveSet.begin(), Record.LiveSet.end());
+  StabilizeOrder(LiveVec);
+
+  // First, generate spills.
+  // TODO: Be smarter about where spills are inserted to avoid redundant
+  // ones, and ideally consult profile weights to minimize store frequency.
+  Instruction *SpillInsertBefore = CS.getInstruction();
+  auto generateSpill = [&](Value *Var) {
+    AllocaInst *&SpillSlot = SpillMap[Var];
+    // When generating new spill slots, walk AllocaInsertBefore back
+    // to avoid mixing with stores if the first instruction in the
+    // function happens to be a statepoint.
+    if (!SpillSlot)
+      AllocaInsertBefore = SpillSlot =
+          new AllocaInst(Var->getType(), suffixed_name_or(Var, ".gc_spill", ""),
+                         AllocaInsertBefore);
+    new StoreInst(Var, SpillSlot, SpillInsertBefore);
+    Record.SpillSlots.push_back(SpillSlot);
+  };
+
+  // TODO: Make the liveness information in the record more verbose for
+  // invokes so that, if spilling only across exception edges, we can
+  // spill only the values live into the EH pad.
+
+  // Spill all live-across values.
+  for (Value *Var : LiveVec)
+    generateSpill(Var);
+
+  // Next, generate fills.
+  auto generateFill = [&](Value *Var, Instruction *LoadInsertBefore) {
+    auto *Fill =
+        new LoadInst(SpillMap[Var], suffixed_name_or(Var, ".gc_reload", ""),
+                     LoadInsertBefore);
+    Record.ReloadedValues[Fill] = Var;
+  };
+
+  // Generate normal-path fills if necessary
+  if (SpillOnNormalPath) {
+    Instruction *LoadInsertBefore;
+    if (CS.isCall())
+      LoadInsertBefore = CS.getInstruction()->getNextNode();
+    else
+      LoadInsertBefore =
+          &cast<InvokeInst>(CS.getInstruction())->getNormalDest()->front();
+    assert(!isa<PHINode>(LoadInsertBefore) &&
+           "Expected critical edges to be split");
+    for (Value *Var : LiveVec)
+      generateFill(Var, LoadInsertBefore);
+  }
+
+  // Generate exception-path fills if necessary
+  if (CS.isInvoke() && SpillOnExceptionPath) {
+    auto *Invoke = cast<InvokeInst>(CS.getInstruction());
+    BasicBlock *Pad = Invoke->getUnwindDest();
+    assert(Pad->getSinglePredecessor() &&
+           "Expected critical edges to be split");
+    for (Value *Var : LiveVec)
+      generateFill(Var, &*Pad->getFirstInsertionPt());
+  }
+
+  // If we've spilled on all paths, we don't need to generate any relocates,
+  // so clear the live set for this statepoint.
+  if (SpillOnNormalPath && (CS.isCall() || SpillOnExceptionPath))
+    Record.LiveSet.clear();
+}
+
 static void
 makeStatepointExplicitImpl(const CallSite CS, /* to replace */
                            const SmallVectorImpl<Value *> &BasePtrs,
@@ -1402,7 +1502,19 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
   Instruction *InsertBefore = CS.getInstruction();
   IRBuilder<> Builder(InsertBefore);
 
-  ArrayRef<Value *> GCArgs(LiveVariables);
+  // The gc args are the concatenation of the live variables and the spill
+  // slots.
+  ArrayRef<Value *> GCArgs;
+  SmallVector<Value *, 64> ConcatenatedArgs;
+  if (Result.SpillSlots.empty()) {
+    GCArgs = ArrayRef<Value *>(LiveVariables);
+  } else if (LiveVariables.empty()) {
+    GCArgs = ArrayRef<Value *>(Result.SpillSlots);
+  } else {
+    ConcatenatedArgs.append(LiveVariables.begin(), LiveVariables.end());
+    ConcatenatedArgs.append(Result.SpillSlots.begin(), Result.SpillSlots.end());
+    GCArgs = ArrayRef<Value *>(ConcatenatedArgs);
+  }
   uint64_t StatepointID = 0xABCDEF00;
   uint32_t NumPatchBytes = 0;
   uint32_t Flags = uint32_t(StatepointFlags::None);
@@ -1479,21 +1591,25 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
     Token = Invoke;
 
     // Generate gc relocates in exceptional path
-    BasicBlock *UnwindBlock = ToReplace->getUnwindDest();
-    assert(!isa<PHINode>(UnwindBlock->begin()) &&
-           UnwindBlock->getUniquePredecessor() &&
-           "can't safely insert in this block!");
+    if (SpillOnExceptionPath) {
+      Result.UnwindToken = nullptr;
+    } else {
+      BasicBlock *UnwindBlock = ToReplace->getUnwindDest();
+      assert(!isa<PHINode>(UnwindBlock->begin()) &&
+             UnwindBlock->getUniquePredecessor() &&
+             "can't safely insert in this block!");
 
-    Builder.SetInsertPoint(&*UnwindBlock->getFirstInsertionPt());
-    Builder.SetCurrentDebugLocation(ToReplace->getDebugLoc());
+      Builder.SetInsertPoint(&*UnwindBlock->getFirstInsertionPt());
+      Builder.SetCurrentDebugLocation(ToReplace->getDebugLoc());
 
-    // Attach exceptional gc relocates to the landingpad.
-    Instruction *ExceptionalToken = UnwindBlock->getLandingPadInst();
-    Result.UnwindToken = ExceptionalToken;
+      // Attach exceptional gc relocates to the landingpad.
+      Instruction *ExceptionalToken = UnwindBlock->getLandingPadInst();
+      Result.UnwindToken = ExceptionalToken;
 
-    const unsigned LiveStartIdx = Statepoint(Token).gcArgsStartIdx();
-    CreateGCRelocates(LiveVariables, LiveStartIdx, BasePtrs, ExceptionalToken,
-                      Builder);
+      const unsigned LiveStartIdx = Statepoint(Token).gcArgsStartIdx();
+      CreateGCRelocates(LiveVariables, LiveStartIdx, BasePtrs, ExceptionalToken,
+                        Builder);
+    }
 
     // Generate gc relocates and returns for normal block
     BasicBlock *NormalDest = ToReplace->getNormalDest();
@@ -1533,6 +1649,13 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
   CreateGCRelocates(LiveVariables, LiveStartIdx, BasePtrs, Token, Builder);
 }
 
+// FIXME: This gives nondeterministic output when values are nameless
+static void StabilizeOrder(SmallVectorImpl<Value *> &LiveVec) {
+  std::sort(LiveVec.begin(), LiveVec.end(), [](const Value *L, const Value *R) {
+    return L->getName() < R->getName();
+  });
+}
+// FIXME: This gives nondeterministic output when values are nameless
 static void StabilizeOrder(SmallVectorImpl<Value *> &BaseVec,
                            SmallVectorImpl<Value *> &LiveVec) {
   assert(BaseVec.size() == LiveVec.size());
@@ -1633,23 +1756,23 @@ insertRelocationStores(iterator_range<Value::user_iterator> GCRelocs,
 }
 
 // Helper function for the "relocationViaAlloca". Similar to the
-// "insertRelocationStores" but works for rematerialized values.
+// "insertRelocationStores" but works for reconstituted values
+// (i.e. rematerialized values and reloads of spilled values).
 static void
-insertRematerializationStores(
-  RematerializedValueMapTy RematerializedValues,
-  DenseMap<Value *, Value *> &AllocaMap,
-  DenseSet<Value *> &VisitedLiveValues) {
+insertReconstitutionStores(const ReconstitutedValueMapTy &ReconstitutedValues,
+                           DenseMap<Value *, Value *> &AllocaMap,
+                           DenseSet<Value *> &VisitedLiveValues) {
 
-  for (auto RematerializedValuePair: RematerializedValues) {
-    Instruction *RematerializedValue = RematerializedValuePair.first;
-    Value *OriginalValue = RematerializedValuePair.second;
+  for (auto ReconstitutedValuePair : ReconstitutedValues) {
+    Instruction *ReconstitutedValue = ReconstitutedValuePair.first;
+    Value *OriginalValue = ReconstitutedValuePair.second;
 
     assert(AllocaMap.count(OriginalValue) &&
-           "Can not find alloca for rematerialized value");
+           "Can not find alloca for reconstituted value");
     Value *Alloca = AllocaMap[OriginalValue];
 
-    StoreInst *Store = new StoreInst(RematerializedValue, Alloca);
-    Store->insertAfter(RematerializedValue);
+    StoreInst *Store = new StoreInst(ReconstitutedValue, Alloca);
+    Store->insertAfter(ReconstitutedValue);
 
 #ifndef NDEBUG
     VisitedLiveValues.insert(OriginalValue);
@@ -1676,6 +1799,7 @@ static void relocationViaAlloca(
   SmallVector<AllocaInst *, 200> PromotableAllocas;
   // Used later to chack that we have enough allocas to store all values
   std::size_t NumRematerializedValues = 0;
+  std::size_t NumSpilledValues = 0;
   PromotableAllocas.reserve(Live.size());
 
   // Emit alloca for "LiveValue" and record it in "allocaMap" and
@@ -1691,8 +1815,8 @@ static void relocationViaAlloca(
   for (Value *V : Live)
     emitAllocaFor(V);
 
-  // Emit allocas for rematerialized values
-  for (const auto &Info : Records)
+  // Emit allocas for reconstituted values
+  for (const auto &Info : Records) {
     for (auto RematerializedValuePair : Info.RematerializedValues) {
       Value *OriginalValue = RematerializedValuePair.second;
       if (AllocaMap.count(OriginalValue) != 0)
@@ -1701,6 +1825,16 @@ static void relocationViaAlloca(
       emitAllocaFor(OriginalValue);
       ++NumRematerializedValues;
     }
+
+    for (auto SpilledValuePair : Info.ReloadedValues) {
+      Value *OriginalValue = SpilledValuePair.second;
+      if (AllocaMap.count(OriginalValue) != 0)
+        continue;
+
+      emitAllocaFor(OriginalValue);
+      ++NumSpilledValues;
+    }
+  }
 
   // The next two loops are part of the same conceptual operation.  We need to
   // insert a store to the alloca after the original def and at each
@@ -1722,14 +1856,18 @@ static void relocationViaAlloca(
 
     // In case if it was invoke statepoint
     // we will insert stores for exceptional path gc relocates.
-    if (isa<InvokeInst>(Statepoint)) {
+    if (isa<InvokeInst>(Statepoint) && Info.UnwindToken) {
       insertRelocationStores(Info.UnwindToken->users(), AllocaMap,
                              VisitedLiveValues);
     }
 
     // Do similar thing with rematerialized values
-    insertRematerializationStores(Info.RematerializedValues, AllocaMap,
-                                  VisitedLiveValues);
+    insertReconstitutionStores(Info.RematerializedValues, AllocaMap,
+                               VisitedLiveValues);
+
+    // And with reloads
+    insertReconstitutionStores(Info.ReloadedValues, AllocaMap,
+                               VisitedLiveValues);
 
     if (ClobberNonLive) {
       // As a debugging aid, pretend that an unrelocated pointer becomes null at
@@ -1833,7 +1971,8 @@ static void relocationViaAlloca(
     }
   }
 
-  assert(PromotableAllocas.size() == Live.size() + NumRematerializedValues &&
+  assert(PromotableAllocas.size() ==
+             Live.size() + NumRematerializedValues + NumSpilledValues &&
          "we must have the same allocas with lives");
   if (!PromotableAllocas.empty()) {
     // Apply mem2reg to promote alloca to SSA
@@ -2300,6 +2439,13 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
   for (size_t i = 0; i < Records.size(); i++)
     rematerializeLiveValues(ToUpdate[i], Records[i], TTI);
 
+  // Generate spills/fills dictated by the strategy.
+  if (SpillOnNormalPath || SpillOnExceptionPath) {
+    SpillMapTy SpillMap;
+    for (size_t I = 0; I < Records.size(); ++I)
+      generateSpills(SpillMap, ToUpdate[I], Records[I]);
+  }
+
   // We need this to safely RAUW and delete call or invoke return values that
   // may themselves be live over a statepoint.  For details, please see usage in
   // makeStatepointExplicitImpl.
@@ -2343,10 +2489,18 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
     // the live values might be the result of a call which needs a safepoint.
     // That Value* no longer exists and we need to use the new gc_result.
     // Thankfully, the live set is embedded in the statepoint (and updated), so
-    // we just grab that.
+    // we just grab that.  The only bit of trickery is that the "gc args" of
+    // the statepoint are the concatenation of the relocated values (which need
+    // to be inserted in the "live" set and the spill slots for spilled values
+    // (which should *not* be inserted in the "live" set), so we have to find
+    // the split point.
     Statepoint Statepoint(Info.StatepointToken);
-    Live.insert(Live.end(), Statepoint.gc_args_begin(),
-                Statepoint.gc_args_end());
+    auto LiveArgsBegin = Statepoint.gc_args_begin();
+    auto GcArgsEnd = Statepoint.gc_args_end();
+    auto LiveArgsEnd = LiveArgsBegin;
+    while (LiveArgsEnd != GcArgsEnd && !isa<AllocaInst>(*LiveArgsEnd))
+      ++LiveArgsEnd;
+    Live.insert(Live.end(), LiveArgsBegin, LiveArgsEnd);
 #ifndef NDEBUG
     // Do some basic sanity checks on our liveness results before performing
     // relocation.  Relocation can and will turn mistakes in liveness results
