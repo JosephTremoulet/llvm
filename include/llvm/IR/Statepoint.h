@@ -330,6 +330,8 @@ public:
     // This takes care both of relocates for call statepoints and relocates
     // on normal path of invoke statepoint.
     if (!isa<LandingPadInst>(Token)) {
+      assert(!cast<Instruction>(Token)->isEHPad() &&
+             "Funclet pads don't support 1:1 relocate:statepoint mapping");
       return cast<Instruction>(Token);
     }
 
@@ -390,13 +392,23 @@ StatepointBase<FunTy, InstructionTy, ValueTy, CallSiteTy>::getRelocates()
     return Result;
 
   // We need to scan thorough exceptional relocations if it is invoke statepoint
-  LandingPadInst *LandingPad =
-      cast<InvokeInst>(getInstruction())->getLandingPadInst();
+  const InvokeInst *Invoke = cast<InvokeInst>(getInstruction());
+  if (Invoke->getUnwindDest()->isLandingPad()) {
+    LandingPadInst *LandingPad =
+        cast<InvokeInst>(getInstruction())->getLandingPadInst();
 
-  // Search for gc relocates that are attached to this landingpad.
-  for (const User *LandingPadUser : LandingPad->users()) {
-    if (auto *Relocate = dyn_cast<GCRelocateInst>(LandingPadUser))
-      Result.push_back(Relocate);
+    // Search for gc relocates that are attached to this landingpad.
+    for (const User *LandingPadUser : LandingPad->users()) {
+      if (auto *Relocate = dyn_cast<GCRelocateInst>(LandingPadUser))
+        Result.push_back(Relocate);
+    }
+#ifndef NDEBUG
+  } else {
+    for (auto *UnwindDest : Invoke->getTransitiveUnwindDests())
+      for (auto *U : UnwindDest->getFirstNonPHI()->users())
+        assert(!isa<GCRelocateInst>(U) &&
+               "Relocates on funclet EH not supported");
+#endif // NDEBUG
   }
   return Result;
 }
