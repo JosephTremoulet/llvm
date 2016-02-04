@@ -1404,8 +1404,10 @@ public:
 // Generate spill slots for values that get spilled rather than
 // relocated/rematerialized.
 typedef DenseMap<Value *, AllocaInst *> SpillMapTy;
+typedef DenseMap<BasicBlock *, SmallPtrSet<Value *, 4>> FillMapTy;
 static void StabilizeOrder(SmallVectorImpl<Value *> &LiveVec);
-static void generateSpills(SpillMapTy &SpillMap, CallSite CS,
+static void generateSpills(SpillMapTy &SpillMap, FillMapTy &FillMap,
+                           CallSite CS,
                            PartiallyConstructedSafepointRecord &Record) {
   assert(SpillOnNormalPath || SpillOnExceptionPath);
 
@@ -1426,9 +1428,10 @@ static void generateSpills(SpillMapTy &SpillMap, CallSite CS,
 
   // First, generate spills.
   // TODO: Be smarter about where spills are inserted to avoid redundant
-  // ones, and ideally consult profile weights to minimize store frequency.
+  // ones (which requires detecting liverange interferences for the PHI case,
+  // and ideally would consult profile weights to minimize store frequency).
   Instruction *SpillInsertBefore = CS.getInstruction();
-  auto generateSpill = [&](Value *Var) {
+  auto generateSpill = [&](Value *Var, Value *Val) {
     AllocaInst *&SpillSlot = SpillMap[Var];
     // When generating new spill slots, walk AllocaInsertBefore back
     // to avoid mixing with stores if the first instruction in the
@@ -1437,17 +1440,36 @@ static void generateSpills(SpillMapTy &SpillMap, CallSite CS,
       AllocaInsertBefore = SpillSlot =
           new AllocaInst(Var->getType(), suffixed_name_or(Var, ".gc_spill", ""),
                          AllocaInsertBefore);
-    new StoreInst(Var, SpillSlot, SpillInsertBefore);
+    new StoreInst(Val, SpillSlot, SpillInsertBefore);
     Record.SpillSlots.push_back(SpillSlot);
   };
 
   // TODO: Make the liveness information in the record more verbose for
-  // invokes so that, if spilling only across exception edges, we can
-  // spill only the values live into the EH pad.
+  // invokes so that:
+  // 1) If spilling only across exception edges, we spill only the values live
+  //    into the EH pad(s).
+  // 2) If a value is live only until a phi source, we spill that value just
+  //    for the phi, instead of once for the phi and once for itself.
 
   // Spill all live-across values.
   for (Value *Var : LiveVec)
-    generateSpill(Var);
+    generateSpill(Var, Var);
+
+  // Spill any necessary incoming PHI values
+  SmallVector<PHINode *, 8> SpilledPHIs;
+  if (CS.isInvoke() && SpillOnExceptionPath) {
+    auto *Invoke = cast<InvokeInst>(CS.getInstruction());
+    BasicBlock *Pred = Invoke->getParent();
+    BasicBlock *Pad = Invoke->getUnwindDest();
+    for (auto I = Pad->begin(); auto *PHI = dyn_cast<PHINode>(&*I); ++I) {
+      // Find the value to store for this PHI
+      Value *IncomingValue = PHI->getIncomingValueForBlock(Pred);
+      // Record that we're spilling this PHI.
+      SpilledPHIs.push_back(PHI);
+      // Generate the spill
+      generateSpill(PHI, IncomingValue);
+    }
+  }
 
   // Next, generate fills.
   auto generateFill = [&](Value *Var, Instruction *LoadInsertBefore) {
@@ -1466,19 +1488,27 @@ static void generateSpills(SpillMapTy &SpillMap, CallSite CS,
       LoadInsertBefore =
           &cast<InvokeInst>(CS.getInstruction())->getNormalDest()->front();
     assert(!isa<PHINode>(LoadInsertBefore) &&
-           "Expected critical edges to be split");
+           "Expected normal critical edges to be split");
     for (Value *Var : LiveVec)
       generateFill(Var, LoadInsertBefore);
   }
 
   // Generate exception-path fills if necessary
   if (CS.isInvoke() && SpillOnExceptionPath) {
+    auto ensureFill = [&](Value *Var, BasicBlock *Pad) {
+      // Don't redundantly reload the same var on behalf
+      // of multiple invoke predecessors.
+      auto &PadFills = FillMap[Pad];
+      if (!PadFills.insert(Var).second)
+        return;
+      generateFill(Var, &*Pad->getFirstInsertionPt());
+    };
     auto *Invoke = cast<InvokeInst>(CS.getInstruction());
     BasicBlock *Pad = Invoke->getUnwindDest();
-    assert(Pad->getSinglePredecessor() &&
-           "Expected critical edges to be split");
     for (Value *Var : LiveVec)
-      generateFill(Var, &*Pad->getFirstInsertionPt());
+      ensureFill(Var, Pad);
+    for (auto *PHI : SpilledPHIs)
+      ensureFill(PHI, Pad);
   }
 
   // If we've spilled on all paths, we don't need to generate any relocates,
@@ -2348,14 +2378,15 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
 
   // When inserting gc.relocates for invokes, we need to be able to insert at
   // the top of the successor blocks.  See the comment on
-  // normalForInvokeSafepoint on exactly what is needed.  Note that this step
+  // normalizeForInvokeSafepoint on exactly what is needed.  Note that this step
   // may restructure the CFG.
   for (CallSite CS : ToUpdate) {
     if (!CS.isInvoke())
       continue;
     auto *II = cast<InvokeInst>(CS.getInstruction());
     normalizeForInvokeSafepoint(II->getNormalDest(), II->getParent(), DT);
-    normalizeForInvokeSafepoint(II->getUnwindDest(), II->getParent(), DT);
+    if (!SpillOnExceptionPath)
+      normalizeForInvokeSafepoint(II->getUnwindDest(), II->getParent(), DT);
   }
 
   SmallVector<PartiallyConstructedSafepointRecord, 64> Records(ToUpdate.size());
@@ -2442,8 +2473,9 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
   // Generate spills/fills dictated by the strategy.
   if (SpillOnNormalPath || SpillOnExceptionPath) {
     SpillMapTy SpillMap;
+    FillMapTy FillMap;
     for (size_t I = 0; I < Records.size(); ++I)
-      generateSpills(SpillMap, ToUpdate[I], Records[I]);
+      generateSpills(SpillMap, FillMap, ToUpdate[I], Records[I]);
   }
 
   // We need this to safely RAUW and delete call or invoke return values that
@@ -2951,6 +2983,9 @@ static void recomputeLiveInValues(GCPtrLivenessData &RevisedLivenessData,
                                   const BaseMapMapTy &BaseMaps,
                                   const CallSite &CS,
                                   PartiallyConstructedSafepointRecord &Info) {
+  // TODO: update this to collect separate live sets for normal and exception
+  // paths; when spilling on exception path but not normal path, this lets us
+  // skip spilling values that are live only on the normal path.
   StatepointLiveSetTy Updated;
   findLiveSetAtStatepoint(CS, RevisedLivenessData, &BaseMaps, Updated);
 
