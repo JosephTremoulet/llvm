@@ -1404,18 +1404,29 @@ static void generateSpills(SpillMapTy &SpillMap, FillMapTy &FillMap,
     generateSpill(Var, Var);
 
   // Spill any necessary incoming PHI values
-  SmallVector<PHINode *, 8> SpilledPHIs;
+  MapVector<Value *, Value *> IncomingPHIValueMap;
   if (CS.isInvoke() && SpillOnExceptionPath) {
     auto *Invoke = cast<InvokeInst>(CS.getInstruction());
     BasicBlock *Pred = Invoke->getParent();
-    BasicBlock *Pad = Invoke->getUnwindDest();
-    for (auto I = Pad->begin(); auto *PHI = dyn_cast<PHINode>(&*I); ++I) {
-      // Find the value to store for this PHI
-      Value *IncomingValue = PHI->getIncomingValueForBlock(Pred);
-      // Record that we're spilling this PHI.
-      SpilledPHIs.push_back(PHI);
-      // Generate the spill
-      generateSpill(PHI, IncomingValue);
+    for (BasicBlock *Pad : Invoke->getTransitiveUnwindDests<false>()) {
+      for (auto I = Pad->begin(); auto *PHI = dyn_cast<PHINode>(&*I); ++I) {
+        // Find the value to store for this PHI
+        Value *IncomingValue = PHI->getIncomingValueForBlock(Pred);
+        // If the incoming value was itself a PHI we've walked over,
+        // recurse to that incoming value
+        auto MapIter = IncomingPHIValueMap.find(IncomingValue);
+        if (MapIter != IncomingPHIValueMap.end())
+          IncomingValue = MapIter->second;
+        // Record the incoming value in case we see a use of it in
+        // a subsequent PHI.
+        IncomingPHIValueMap[PHI] = IncomingValue;
+        // Generate the spill
+        generateSpill(PHI, IncomingValue);
+      }
+      // Update pred if we're going to visit this block's successors,
+      // which we'll do iff it's unsplittable.
+      if (isa<TerminatorInst>(Pad->getFirstNonPHI()))
+        Pred = Pad;
     }
   }
 
@@ -1452,11 +1463,12 @@ static void generateSpills(SpillMapTy &SpillMap, FillMapTy &FillMap,
       generateFill(Var, &*Pad->getFirstInsertionPt());
     };
     auto *Invoke = cast<InvokeInst>(CS.getInstruction());
-    BasicBlock *Pad = Invoke->getUnwindDest();
-    for (Value *Var : LiveVec)
-      ensureFill(Var, Pad);
-    for (auto *PHI : SpilledPHIs)
-      ensureFill(PHI, Pad);
+    for (BasicBlock *Pad : Invoke->getTransitiveUnwindDests()) {
+      for (Value *Var : LiveVec)
+        ensureFill(Var, Pad);
+      for (const auto &IncomingValuePair : IncomingPHIValueMap)
+        ensureFill(IncomingValuePair.first, Pad);
+    }
   }
 
   // If we've spilled on all paths, we don't need to generate any relocates,
@@ -1562,21 +1574,24 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
     if (SpillOnExceptionPath) {
       Result.UnwindToken = nullptr;
     } else {
-      BasicBlock *UnwindBlock = ToReplace->getUnwindDest();
-      assert(!isa<PHINode>(UnwindBlock->begin()) &&
-             UnwindBlock->getUniquePredecessor() &&
-             "can't safely insert in this block!");
+      for (BasicBlock *UnwindBlock : ToReplace->getTransitiveUnwindDests()) {
+        assert(!isa<PHINode>(UnwindBlock->begin()) &&
+               UnwindBlock->getUniquePredecessor() &&
+               "can't safely insert in this block!");
 
-      Builder.SetInsertPoint(&*UnwindBlock->getFirstInsertionPt());
-      Builder.SetCurrentDebugLocation(ToReplace->getDebugLoc());
+        Builder.SetInsertPoint(&*UnwindBlock->getFirstInsertionPt());
+        Builder.SetCurrentDebugLocation(ToReplace->getDebugLoc());
 
-      // Attach exceptional gc relocates to the landingpad.
-      Instruction *ExceptionalToken = UnwindBlock->getLandingPadInst();
-      Result.UnwindToken = ExceptionalToken;
+        // Attach exceptional gc relocates to the landingpad.
+        Instruction *ExceptionalToken = UnwindBlock->getLandingPadInst();
+        assert(Result.UnwindToken == nullptr &&
+               "Cannot report multiple unwind tokens");
+        Result.UnwindToken = ExceptionalToken;
 
-      const unsigned LiveStartIdx = Statepoint(Token).gcPtrsStartIdx();
-      CreateGCRelocates(LiveVariables, LiveStartIdx, BasePtrs, ExceptionalToken,
-                        Builder);
+        const unsigned LiveStartIdx = Statepoint(Token).gcPtrsStartIdx();
+        CreateGCRelocates(LiveVariables, LiveStartIdx, BasePtrs,
+                          ExceptionalToken, Builder);
+      }
     }
 
     // Generate gc relocates and returns for normal block
@@ -1868,7 +1883,8 @@ static void relocationViaAlloca(
       // gc.results and gc.relocates, but that's fine.
       if (auto II = dyn_cast<InvokeInst>(Statepoint)) {
         InsertClobbersAt(&*II->getNormalDest()->getFirstInsertionPt());
-        InsertClobbersAt(&*II->getUnwindDest()->getFirstInsertionPt());
+        for (BasicBlock *UnwindDest : II->getTransitiveUnwindDests())
+          InsertClobbersAt(&*UnwindDest->getFirstInsertionPt());
       } else {
         InsertClobbersAt(cast<Instruction>(Statepoint)->getNextNode());
       }
@@ -2149,16 +2165,16 @@ static void rematerializeLiveValues(CallSite CS,
 
       Instruction *NormalInsertBefore =
           &*Invoke->getNormalDest()->getFirstInsertionPt();
-      Instruction *UnwindInsertBefore =
-          &*Invoke->getUnwindDest()->getFirstInsertionPt();
-
       Instruction *NormalRematerializedValue =
           rematerializeChain(NormalInsertBefore);
-      Instruction *UnwindRematerializedValue =
-          rematerializeChain(UnwindInsertBefore);
-
       Info.RematerializedValues[NormalRematerializedValue] = LiveValue;
-      Info.RematerializedValues[UnwindRematerializedValue] = LiveValue;
+
+      for (BasicBlock *UnwindDest : Invoke->getTransitiveUnwindDests()) {
+        Instruction *UnwindInsertBefore = &*UnwindDest->getFirstInsertionPt();
+        Instruction *UnwindRematerializedValue =
+            rematerializeChain(UnwindInsertBefore);
+        Info.RematerializedValues[UnwindRematerializedValue] = LiveValue;
+      }
     }
   }
 
