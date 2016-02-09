@@ -459,13 +459,12 @@ public:
 
   /// \brief Create a call to the experimental.gc.statepoint intrinsic to
   /// start a new statepoint sequence.
-  CallInst *CreateGCStatepointCall(uint64_t ID, uint32_t NumPatchBytes,
-                                   Value *ActualCallee, uint32_t Flags,
-                                   ArrayRef<Use> CallArgs,
-                                   ArrayRef<Use> TransitionArgs,
-                                   ArrayRef<Use> DeoptArgs,
-                                   ArrayRef<Value *> GCPointers,
-                                   const Twine &Name = "");
+  CallInst *CreateGCStatepointCall(
+      uint64_t ID, uint32_t NumPatchBytes, Value *ActualCallee, uint32_t Flags,
+      ArrayRef<Use> CallArgs, ArrayRef<Use> TransitionArgs,
+      ArrayRef<Use> DeoptArgs, ArrayRef<Value *> SpillSlots,
+      ArrayRef<Value *> BaseSpills, ArrayRef<uint64_t> SpillSizes,
+      ArrayRef<Value *> GCPointers, const Twine &Name = "");
 
   // \brief Conveninence function for the common case when CallArgs are filled
   // in using makeArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be
@@ -490,8 +489,9 @@ public:
       uint64_t ID, uint32_t NumPatchBytes, Value *ActualInvokee,
       BasicBlock *NormalDest, BasicBlock *UnwindDest, uint32_t Flags,
       ArrayRef<Use> InvokeArgs, ArrayRef<Use> TransitionArgs,
-      ArrayRef<Use> DeoptArgs, ArrayRef<Value *> GCPointers,
-      const Twine &Name = "");
+      ArrayRef<Use> DeoptArgs, ArrayRef<Value *> SpillSlots,
+      ArrayRef<Value *> BaseSpills, ArrayRef<uint64_t> SpillSizes,
+      ArrayRef<Value *> GCPointers, const Twine &Name = "");
 
   // Conveninence function for the common case when CallArgs are filled in using
   // makeArrayRef(CS.arg_begin(), CS.arg_end()); Use needs to be .get()'ed to

@@ -162,7 +162,12 @@ public:
   // OpTypes are used to encode information about the following logical
   // operand (which may consist of several MachineOperands) for the
   // OpParser.
-  typedef enum { DirectMemRefOp, IndirectMemRefOp, ConstantOp } OpType;
+  typedef enum {
+    DirectMemRefOp,
+    IndirectMemRefOp,
+    ConstantOp,
+    DoubleIndirectMemRefOp
+  } OpType;
 
   StackMaps(AsmPrinter &AP);
 
