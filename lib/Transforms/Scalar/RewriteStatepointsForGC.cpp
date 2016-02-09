@@ -1351,7 +1351,8 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
     CallInst *ToReplace = cast<CallInst>(CS.getInstruction());
     CallInst *Call = Builder.CreateGCStatepointCall(
         StatepointID, NumPatchBytes, CallTarget, Flags, CallArgs,
-        TransitionArgs, DeoptArgs, GCPointers, "safepoint_token");
+        TransitionArgs, DeoptArgs, None, None, None, GCPointers,
+        "safepoint_token");
 
     Call->setTailCall(ToReplace->isTailCall());
     Call->setCallingConv(ToReplace->getCallingConv());
@@ -1380,7 +1381,7 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
     InvokeInst *Invoke = Builder.CreateGCStatepointInvoke(
         StatepointID, NumPatchBytes, CallTarget, ToReplace->getNormalDest(),
         ToReplace->getUnwindDest(), Flags, CallArgs, TransitionArgs, DeoptArgs,
-        GCPointers, "statepoint_token");
+        None, None, None, GCPointers, "statepoint_token");
 
     Invoke->setCallingConv(ToReplace->getCallingConv());
 

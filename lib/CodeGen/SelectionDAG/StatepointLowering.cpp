@@ -537,6 +537,22 @@ static void lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
       assert(Opt.getValue() && "non gc managed pointer relocated");
     }
   }
+  for (const auto &GcSpill : StatepointSite.gc_spills()) {
+    if (auto *Alloca = dyn_cast<AllocaInst>(GcSpill.SpillSlot)) {
+      auto Opt =
+          S.isGCManagedPointer(Alloca->getAllocatedType()->getScalarType());
+      if (Opt.hasValue()) {
+        assert(Opt.getValue() && "non gc managed pointer in spill slot");
+      }
+    }
+    if (auto *Alloca = dyn_cast<AllocaInst>(GcSpill.BaseSlot)) {
+      auto Opt =
+          S.isGCManagedPointer(Alloca->getAllocatedType()->getScalarType());
+      if (Opt.hasValue()) {
+        assert(Opt.getValue() && "non gc managed pointer in base slot");
+      }
+    }
+  }
 #endif
 
   // Before we actually start lowering (and allocating spill slots for values),
@@ -570,6 +586,30 @@ static void lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   for (const Value *V : StatepointSite.vm_state_args()) {
     SDValue Incoming = Builder.getValue(V);
     lowerIncomingStatepointValue(Incoming, Ops, Builder);
+  }
+
+  // Next, report the number of spill slots.
+  // Note we are intentionally NOT using pushStackMapConstant here, because
+  // emitStatepoint will rewrite this section before we get to recordStatepoint
+  // generating the stack map.
+  const int NumSpills = StatepointSite.getNumSpillSlots();
+  Ops.push_back(Builder.DAG.getTargetConstant(NumSpills, Builder.getCurSDLoc(),
+                                              MVT::i32));
+
+  assert(NumSpills == std::distance(StatepointSite.gc_spills_begin(),
+                                    StatepointSite.gc_spills_end()));
+
+  // For each spill, report its size, the base slot, and the pointer slot.
+  for (const auto &GcSpill : StatepointSite.gc_spills()) {
+    uint64_t ByteSize = GcSpill.SizeInBytes;
+    Ops.push_back(Builder.DAG.getTargetConstant(ByteSize, Builder.getCurSDLoc(),
+                                                MVT::i32));
+
+    const Value *Base = GcSpill.BaseSlot;
+    lowerIncomingStatepointValue(Builder.getValue(Base), Ops, Builder);
+
+    const Value *Spill = GcSpill.SpillSlot;
+    lowerIncomingStatepointValue(Builder.getValue(Spill), Ops, Builder);
   }
 
   // Finally, go ahead and lower all the gc arguments.  There's no prefixed

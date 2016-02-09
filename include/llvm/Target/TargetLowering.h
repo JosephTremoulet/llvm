@@ -2031,10 +2031,16 @@ protected:
   MachineBasicBlock *emitPatchPoint(MachineInstr *MI,
                                     MachineBasicBlock *MBB) const;
 
+  /// Replace/modify any TargetFrameIndex operands with a target-dependent
+  /// sequence of memory operands that is recognized by PrologEpilogInserter.
+  MachineBasicBlock *emitStatepoint(MachineInstr *MI,
+                                    MachineBasicBlock *MBB) const;
+
   /// Add the the MachineInstrBuilder the target-dependent sequence needed to
   /// replace the given TargetFrameIndex operand and be recognized by PEI.
-  void expandPatchPointFrameIndex(MachineOperand &MO,
-                                  MachineInstrBuilder &MIB) const;
+  void expandPatchPointFrameIndex(
+      MachineOperand &MO, MachineInstrBuilder &MIB,
+      Optional<int64_t> ExtraIndirectionSize = None) const;
 };
 
 /// This class defines information used to lower LLVM code to legal SelectionDAG

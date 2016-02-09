@@ -1705,9 +1705,21 @@ void Verifier::verifyStatepoint(ImmutableCallSite CS) {
   Assert(NumDeoptArgs >= 0, "gc.statepoint number of deoptimization arguments "
                             "must be positive",
          &CI);
+  const int EndDeoptArgsInx = EndTransitionArgsInx + 1 + NumDeoptArgs;
 
+  const Value *NumSpillsV = CS.getArgument(EndDeoptArgsInx + 1);
+  Assert(isa<ConstantInt>(NumSpillsV), "gc.statepoint number of spill slots "
+                                       "must be constant integer",
+         &CI);
+  const int NumSpills = cast<ConstantInt>(NumSpillsV)->getZExtValue();
+  Assert(NumDeoptArgs >= 0, "gc.statepoint number of spill slots "
+                            "must be positive",
+         &CI);
+
+  // Double the number of spills in the expected number of arguments because
+  // each spill slot also has a corresponding base spill slot.
   const int ExpectedNumArgs =
-      7 + NumCallArgs + NumTransitionArgs + NumDeoptArgs;
+      8 + NumCallArgs + NumTransitionArgs + NumDeoptArgs + (2 * NumSpills);
   Assert(ExpectedNumArgs <= (int)CS.arg_size(),
          "gc.statepoint too few arguments according to length fields", &CI);
 

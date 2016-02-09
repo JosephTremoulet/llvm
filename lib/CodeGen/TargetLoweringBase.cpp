@@ -1137,10 +1137,104 @@ TargetLoweringBase::emitPatchPoint(MachineInstr *MI,
   return MBB;
 }
 
+/// Replace/modify any TargetFrameIndex operands with a target-dependent
+/// sequence of memory operands that is recognized by PrologEpilogInserter.
+MachineBasicBlock *
+TargetLoweringBase::emitStatepoint(MachineInstr *MI,
+                                   MachineBasicBlock *MBB) const {
+  MachineFunction &MF = *MI->getParent()->getParent();
+  MachineInstrBuilder MIB = BuildMI(MF, MI->getDebugLoc(), MI->getDesc());
+  // Inherit previous memory operands.
+  MIB->setMemRefs(MI->memoperands_begin(), MI->memoperands_end());
+
+  // The incoming statepoint instr has a tail of operands indicating GC
+  // pointers to be relocated.  Some of these come from GC pointer values
+  // directly, others come from allocas for RS4GC-inserted spills.  The
+  // list of GC arguments holds a constant int indicating how many arguments
+  // come from RS4GC-inserted spills, then the spill arguments, then the
+  // other arguments.  We need to find that constant to know how to translate
+  // the ensuing GC arguments.
+  // First, find the number of call arguments, which is always the third
+  // argument on the statepoint (after ID and number-of-patch-bytes).
+  unsigned NumCallArgsIdx = 2;
+  unsigned NumCallArgs = MI->getOperand(NumCallArgsIdx).getImm();
+  // after the operand indicating the number of call args comes:
+  //   1:             the call target
+  //   2:             first call arg
+  //   ...:              ...(other call args)
+  //   NumCallArgs+1: last call arg
+  //   NumCallArgs+2: stackmap constant indicator
+  //   NumCallArgs+3: calling convention specifier
+  //   NumCallArgs+4: stackmap constant indicator
+  //   NumCallArgs+5: statepoint flags
+  //   NumCallArgs+6: stackmap constant indicator
+  //   NumCallArgs+7: number of deopt vm state arguments
+  // We'll need to know the number of deopt arguments to find the spill count.
+  unsigned NumDeoptArgsIdx = NumCallArgsIdx + NumCallArgs + 7;
+  unsigned NumDeoptArgs = MI->getOperand(NumDeoptArgsIdx).getImm();
+  // After the operand indicating the number of deopt arguments come the deopt
+  // argument themselves, then the spill count.
+  unsigned NumSpillsIdx = NumDeoptArgsIdx + NumDeoptArgs + 1;
+  unsigned NumSpills = MI->getOperand(NumSpillsIdx).getImm();
+
+  for (unsigned ArgIdx = 0, ArgEnd = MI->getNumOperands(); ArgIdx < ArgEnd;
+       ++ArgIdx) {
+    if (ArgIdx == NumSpillsIdx) {
+      // Translate each spill record before moving on.
+      for (unsigned SpillIdx = 0; SpillIdx < NumSpills; ++SpillIdx) {
+        // For each spill, what we'll see here is a constant indicating its
+        // size, then its base slot (which usually is a frame index, but may
+        // be the StackMapConstant sentinel followed by a constant pointer
+        // value to communicate e.g. nullptr), then its pointer slot (with
+        // the same encoding as the base slot).
+        int64_t SlotSize = MI->getOperand(++ArgIdx).getImm();
+        MachineOperand &Base = MI->getOperand(++ArgIdx);
+        if (Base.isImm()) {
+          // Constant pointer to base slot; copy the sentinel
+          // and the constant pointer value.
+          assert(Base.getImm() == StackMaps::ConstantOp);
+          MIB.addOperand(Base);
+          MIB.addOperand(MI->getOperand(++ArgIdx));
+        } else {
+          assert(Base.isFI());
+          expandPatchPointFrameIndex(Base, MIB, SlotSize);
+        }
+        MachineOperand &Pointer = MI->getOperand(++ArgIdx);
+        if (Pointer.isImm()) {
+          // Constant pointer to pointer slot; copy the sentinel
+          // and the constant pointer value.
+          assert(Pointer.getImm() == StackMaps::ConstantOp);
+          MIB.addOperand(Pointer);
+          MIB.addOperand(MI->getOperand(++ArgIdx));
+        } else {
+          assert(Pointer.isFI());
+          expandPatchPointFrameIndex(Pointer, MIB, SlotSize);
+        }
+      }
+      // Move on to the gc pointer operands.
+      continue;
+    }
+    MachineOperand &MO = MI->getOperand(ArgIdx);
+    if (!MO.isFI()) {
+      MIB.addOperand(MO);
+      continue;
+    }
+
+    expandPatchPointFrameIndex(MO, MIB);
+  }
+
+  // Replace the instruction.
+  MBB->insert(MachineBasicBlock::iterator(MI), MIB);
+  MI->eraseFromParent();
+
+  return MBB;
+}
+
 /// Add the the MachineInstrBuilder the target-dependent sequence needed to
 /// replace the given TargetFrameIndex operand and be recognized by PEI.
 void TargetLoweringBase::expandPatchPointFrameIndex(
-    MachineOperand &MO, MachineInstrBuilder &MIB) const {
+    MachineOperand &MO, MachineInstrBuilder &MIB,
+    Optional<int64_t> ExtraIndirectionSize) const {
   assert(MO.isFI());
   MachineInstr *MI = MO.getParent();
   MachineFunction &MF = *MI->getParent()->getParent();
@@ -1169,16 +1263,32 @@ void TargetLoweringBase::expandPatchPointFrameIndex(
     // used for patchpoints/stackmaps at all, for these spilling is done via
     // foldMemoryOperand callback only.
     assert(MI->getOpcode() == TargetOpcode::STATEPOINT && "sanity");
-    MIB.addImm(StackMaps::IndirectMemRefOp);
-    MIB.addImm(MFI.getObjectSize(FI));
+    if (ExtraIndirectionSize.hasValue()) {
+      // The value that got spilled was a pointer to the slot that holds the
+      // GC pointer to be relocated
+      MIB.addImm(StackMaps::DoubleIndirectMemRefOp);
+      MIB.addImm(ExtraIndirectionSize.getValue());
+    } else {
+      MIB.addImm(StackMaps::IndirectMemRefOp);
+      MIB.addImm(MFI.getObjectSize(FI));
+    }
     MIB.addOperand(MO);
     MIB.addImm(0);
   } else {
     // direct-mem-ref tag, #FI, offset.
     // Used by patchpoint, and direct alloca arguments to statepoints
-    MIB.addImm(StackMaps::DirectMemRefOp);
-    MIB.addOperand(MO);
-    MIB.addImm(0);
+    if (ExtraIndirectionSize.hasValue()) {
+      // The value reported is a stack slot into which the GC pointer
+      // was spilled.
+      MIB.addImm(StackMaps::IndirectMemRefOp);
+      MIB.addImm(ExtraIndirectionSize.getValue());
+      MIB.addOperand(MO);
+      MIB.addImm(0);
+    } else {
+      MIB.addImm(StackMaps::DirectMemRefOp);
+      MIB.addOperand(MO);
+      MIB.addImm(0);
+    }
   }
 
   // Add a new memory operand for this FI.

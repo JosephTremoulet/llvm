@@ -77,6 +77,40 @@ protected:
 public:
   typedef typename CallSiteTy::arg_iterator arg_iterator;
 
+  struct GCSpill {
+    ValueTy *SpillSlot;
+    ValueTy *BaseSlot;
+    uint64_t SizeInBytes;
+  };
+
+  class gc_spill_iterator
+      : public std::iterator<std::input_iterator_tag, GCSpill> {
+    arg_iterator SpillI;
+    arg_iterator BaseI;
+    arg_iterator SizeI;
+
+  public:
+    explicit gc_spill_iterator(arg_iterator SpillI, arg_iterator BaseI,
+                               arg_iterator SizeI)
+        : SpillI(SpillI), BaseI(BaseI), SizeI(SizeI) {}
+
+    GCSpill operator*() {
+      return {*SpillI, *BaseI, cast<ConstantInt>(&*SizeI)->getZExtValue()};
+    }
+    gc_spill_iterator &operator++() {
+      ++SpillI;
+      ++BaseI;
+      ++SizeI;
+      return *this;
+    }
+    bool operator==(const gc_spill_iterator &Other) {
+      return (this->SpillI == Other.SpillI);
+    }
+    bool operator!=(const gc_spill_iterator &Other) {
+      return !operator==(Other);
+    }
+  };
+
   enum {
     IDPos = 0,
     NumPatchBytesPos = 1,
@@ -227,8 +261,60 @@ public:
     return make_range(vm_state_begin(), vm_state_end());
   }
 
+  int getNumSpillSlots() const {
+    const Value *NumSpillSlots = *vm_state_end();
+    return cast<ConstantInt>(NumSpillSlots)->getZExtValue();
+  }
+
+  typename CallSiteTy::arg_iterator spill_slots_begin() const {
+    auto I = vm_state_end() + 1;
+    assert((getCallSite().arg_end() - I) >= 0);
+    return I;
+  }
+
+  typename CallSiteTy::arg_iterator spill_slots_end() const {
+    auto *I = spill_slots_begin() + getNumSpillSlots();
+    assert((getCallSite().arg_end() - I) >= 0);
+    return I;
+  }
+
+  typename CallSiteTy::arg_iterator base_spills_begin() const {
+    return spill_slots_end();
+  }
+
+  typename CallSiteTy::arg_iterator base_spills_end() const {
+    auto *I = base_spills_begin() + getNumSpillSlots();
+    assert((getCallSite().arg_end() - I) >= 0);
+    return I;
+  }
+
+  typename CallSiteTy::arg_iterator spill_sizes_begin() const {
+    return base_spills_end();
+  }
+
+  typename CallSiteTy::arg_iterator spill_sizes_end() const {
+    auto *I = spill_sizes_begin() + getNumSpillSlots();
+    assert((getCallSite().arg_end() - I) >= 0);
+    return I;
+  }
+
+  gc_spill_iterator gc_spills_begin() const {
+    return gc_spill_iterator(spill_slots_begin(), base_spills_begin(),
+                             spill_sizes_begin());
+  }
+
+  gc_spill_iterator gc_spills_end() const {
+    return gc_spill_iterator(spill_slots_end(), base_spills_end(),
+                             spill_sizes_end());
+  }
+
+  // range adapter for spill pairs
+  iterator_range<gc_spill_iterator> gc_spills() const {
+    return make_range(gc_spills_begin(), gc_spills_end());
+  }
+
   typename CallSiteTy::arg_iterator gc_ptrs_begin() const {
-    return vm_state_end();
+    return spill_sizes_end();
   }
   typename CallSiteTy::arg_iterator gc_ptrs_end() const {
     return getCallSite().arg_end();
@@ -275,6 +361,8 @@ public:
     (void)gc_transition_args_end();
     (void)vm_state_begin();
     (void)vm_state_end();
+    (void)gc_spills_begin();
+    (void)gc_spills_end();
     (void)gc_ptrs_begin();
     (void)gc_ptrs_end();
   }
