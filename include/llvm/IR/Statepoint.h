@@ -227,20 +227,20 @@ public:
     return make_range(vm_state_begin(), vm_state_end());
   }
 
-  typename CallSiteTy::arg_iterator gc_args_begin() const {
+  typename CallSiteTy::arg_iterator gc_ptrs_begin() const {
     return vm_state_end();
   }
-  typename CallSiteTy::arg_iterator gc_args_end() const {
+  typename CallSiteTy::arg_iterator gc_ptrs_end() const {
     return getCallSite().arg_end();
   }
 
-  unsigned gcArgsStartIdx() const {
-    return gc_args_begin() - getInstruction()->op_begin();
+  unsigned gcPtrsStartIdx() const {
+    return gc_ptrs_begin() - getInstruction()->op_begin();
   }
 
-  /// range adapter for gc arguments
-  iterator_range<arg_iterator> gc_args() const {
-    return make_range(gc_args_begin(), gc_args_end());
+  /// range adapter for gc pointers
+  iterator_range<arg_iterator> gc_ptrs() const {
+    return make_range(gc_ptrs_begin(), gc_ptrs_end());
   }
 
   /// Get list of all gc reloactes linked to this statepoint
@@ -275,8 +275,8 @@ public:
     (void)gc_transition_args_end();
     (void)vm_state_begin();
     (void)vm_state_end();
-    (void)gc_args_begin();
-    (void)gc_args_end();
+    (void)gc_ptrs_begin();
+    (void)gc_ptrs_end();
   }
 #endif
 };

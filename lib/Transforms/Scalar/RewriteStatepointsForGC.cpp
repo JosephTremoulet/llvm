@@ -1318,7 +1318,7 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
   Instruction *InsertBefore = CS.getInstruction();
   IRBuilder<> Builder(InsertBefore);
 
-  ArrayRef<Value *> GCArgs(LiveVariables);
+  ArrayRef<Value *> GCPointers(LiveVariables);
   uint64_t StatepointID = 0xABCDEF00;
   uint32_t NumPatchBytes = 0;
   uint32_t Flags = uint32_t(StatepointFlags::None);
@@ -1351,7 +1351,7 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
     CallInst *ToReplace = cast<CallInst>(CS.getInstruction());
     CallInst *Call = Builder.CreateGCStatepointCall(
         StatepointID, NumPatchBytes, CallTarget, Flags, CallArgs,
-        TransitionArgs, DeoptArgs, GCArgs, "safepoint_token");
+        TransitionArgs, DeoptArgs, GCPointers, "safepoint_token");
 
     Call->setTailCall(ToReplace->isTailCall());
     Call->setCallingConv(ToReplace->getCallingConv());
@@ -1380,7 +1380,7 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
     InvokeInst *Invoke = Builder.CreateGCStatepointInvoke(
         StatepointID, NumPatchBytes, CallTarget, ToReplace->getNormalDest(),
         ToReplace->getUnwindDest(), Flags, CallArgs, TransitionArgs, DeoptArgs,
-        GCArgs, "statepoint_token");
+        GCPointers, "statepoint_token");
 
     Invoke->setCallingConv(ToReplace->getCallingConv());
 
@@ -1407,7 +1407,7 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
     Instruction *ExceptionalToken = UnwindBlock->getLandingPadInst();
     Result.UnwindToken = ExceptionalToken;
 
-    const unsigned LiveStartIdx = Statepoint(Token).gcArgsStartIdx();
+    const unsigned LiveStartIdx = Statepoint(Token).gcPtrsStartIdx();
     CreateGCRelocates(LiveVariables, LiveStartIdx, BasePtrs, ExceptionalToken,
                       Builder);
 
@@ -1445,7 +1445,7 @@ makeStatepointExplicitImpl(const CallSite CS, /* to replace */
   Result.StatepointToken = Token;
 
   // Second, create a gc.relocate for every live variable
-  const unsigned LiveStartIdx = Statepoint(Token).gcArgsStartIdx();
+  const unsigned LiveStartIdx = Statepoint(Token).gcPtrsStartIdx();
   CreateGCRelocates(LiveVariables, LiveStartIdx, BasePtrs, Token, Builder);
 }
 
@@ -2179,8 +2179,8 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
     // Thankfully, the live set is embedded in the statepoint (and updated), so
     // we just grab that.
     Statepoint Statepoint(Info.StatepointToken);
-    Live.insert(Live.end(), Statepoint.gc_args_begin(),
-                Statepoint.gc_args_end());
+    Live.insert(Live.end(), Statepoint.gc_ptrs_begin(),
+                Statepoint.gc_ptrs_end());
 #ifndef NDEBUG
     // Do some basic sanity checks on our liveness results before performing
     // relocation.  Relocation can and will turn mistakes in liveness results
@@ -2188,7 +2188,7 @@ static bool insertParsePoints(Function &F, DominatorTree &DT,
     // TODO: It would be nice to test consistency as well
     assert(DT.isReachableFromEntry(Info.StatepointToken->getParent()) &&
            "statepoint must be reachable or liveness is meaningless");
-    for (Value *V : Statepoint.gc_args()) {
+    for (Value *V : Statepoint.gc_ptrs()) {
       if (!isa<Instruction>(V))
         // Non-instruction values trivial dominate all possible uses
         continue;

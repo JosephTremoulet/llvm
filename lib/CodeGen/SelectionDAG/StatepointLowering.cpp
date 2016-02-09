@@ -590,7 +590,7 @@ static void lowerStatepointMetaArgs(SmallVectorImpl<SDValue> &Ops,
   // allocas and give control over placement to the consumer.  In this case,
   // it is the contents of the slot which may get updated, not the pointer to
   // the alloca
-  for (Value *V : StatepointSite.gc_args()) {
+  for (Value *V : StatepointSite.gc_ptrs()) {
     SDValue Incoming = Builder.getValue(V);
     if (FrameIndexSDNode *FI = dyn_cast<FrameIndexSDNode>(Incoming)) {
       // This handles allocas as arguments to the statepoint
