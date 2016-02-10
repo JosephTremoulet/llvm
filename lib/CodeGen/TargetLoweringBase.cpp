@@ -1110,86 +1110,89 @@ bool TargetLoweringBase::isLegalRC(const TargetRegisterClass *RC) const {
   return false;
 }
 
-/// Replace/modify any TargetFrameIndex operands with a targte-dependent
+/// Replace/modify any TargetFrameIndex operands with a target-dependent
 /// sequence of memory operands that is recognized by PrologEpilogInserter.
-MachineBasicBlock*
+MachineBasicBlock *
 TargetLoweringBase::emitPatchPoint(MachineInstr *MI,
                                    MachineBasicBlock *MBB) const {
   MachineFunction &MF = *MI->getParent()->getParent();
+  MachineInstrBuilder MIB = BuildMI(MF, MI->getDebugLoc(), MI->getDesc());
+  // Inherit previous memory operands.
+  MIB->setMemRefs(MI->memoperands_begin(), MI->memoperands_end());
+
+  for (MachineOperand &MO : MI->operands()) {
+    if (!MO.isFI()) {
+      MIB.addOperand(MO);
+      continue;
+    }
+
+    expandPatchPointFrameIndex(MO, MIB);
+    assert(MIB->mayLoad() && "Folded a stackmap use to a non-load!");
+  }
+
+  // Replace the instruction.
+  MBB->insert(MachineBasicBlock::iterator(MI), MIB);
+  MI->eraseFromParent();
+
+  return MBB;
+}
+
+/// Add the the MachineInstrBuilder the target-dependent sequence needed to
+/// replace the given TargetFrameIndex operand and be recognized by PEI.
+void TargetLoweringBase::expandPatchPointFrameIndex(
+    MachineOperand &MO, MachineInstrBuilder &MIB) const {
+  assert(MO.isFI());
+  MachineInstr *MI = MO.getParent();
+  MachineFunction &MF = *MI->getParent()->getParent();
   MachineFrameInfo &MFI = *MF.getFrameInfo();
+
+  // foldMemoryOperand builds a new MI after replacing a single FI operand
+  // with the canonical set of five x86 addressing-mode operands.
+  int FI = MO.getIndex();
 
   // We're handling multiple types of operands here:
   // PATCHPOINT MetaArgs - live-in, read only, direct
   // STATEPOINT Deopt Spill - live-through, read only, indirect
   // STATEPOINT Deopt Alloca - live-through, read only, direct
   // (We're currently conservative and mark the deopt slots read/write in
-  // practice.) 
+  // practice.)
   // STATEPOINT GC Spill - live-through, read/write, indirect
   // STATEPOINT GC Alloca - live-through, read/write, direct
   // The live-in vs live-through is handled already (the live through ones are
   // all stack slots), but we need to handle the different type of stackmap
   // operands and memory effects here.
 
-  // MI changes inside this loop as we grow operands.
-  for(unsigned OperIdx = 0; OperIdx != MI->getNumOperands(); ++OperIdx) {
-    MachineOperand &MO = MI->getOperand(OperIdx);
-    if (!MO.isFI())
-      continue;
-
-    // foldMemoryOperand builds a new MI after replacing a single FI operand
-    // with the canonical set of five x86 addressing-mode operands.
-    int FI = MO.getIndex();
-    MachineInstrBuilder MIB = BuildMI(MF, MI->getDebugLoc(), MI->getDesc());
-
-    // Copy operands before the frame-index.
-    for (unsigned i = 0; i < OperIdx; ++i)
-      MIB.addOperand(MI->getOperand(i));
-    // Add frame index operands recognized by stackmaps.cpp
-    if (MFI.isStatepointSpillSlotObjectIndex(FI)) {
-      // indirect-mem-ref tag, size, #FI, offset.
-      // Used for spills inserted by StatepointLowering.  This codepath is not
-      // used for patchpoints/stackmaps at all, for these spilling is done via
-      // foldMemoryOperand callback only.
-      assert(MI->getOpcode() == TargetOpcode::STATEPOINT && "sanity");
-      MIB.addImm(StackMaps::IndirectMemRefOp);
-      MIB.addImm(MFI.getObjectSize(FI));
-      MIB.addOperand(MI->getOperand(OperIdx));
-      MIB.addImm(0);
-    } else {
-      // direct-mem-ref tag, #FI, offset.
-      // Used by patchpoint, and direct alloca arguments to statepoints
-      MIB.addImm(StackMaps::DirectMemRefOp);
-      MIB.addOperand(MI->getOperand(OperIdx));
-      MIB.addImm(0);
-    }
-    // Copy the operands after the frame index.
-    for (unsigned i = OperIdx + 1; i != MI->getNumOperands(); ++i)
-      MIB.addOperand(MI->getOperand(i));
-
-    // Inherit previous memory operands.
-    MIB->setMemRefs(MI->memoperands_begin(), MI->memoperands_end());
-    assert(MIB->mayLoad() && "Folded a stackmap use to a non-load!");
-
-    // Add a new memory operand for this FI.
-    assert(MFI.getObjectOffset(FI) != -1);
-
-    unsigned Flags = MachineMemOperand::MOLoad;
-    if (MI->getOpcode() == TargetOpcode::STATEPOINT) {
-      Flags |= MachineMemOperand::MOStore;
-      Flags |= MachineMemOperand::MOVolatile;
-    }
-    MachineMemOperand *MMO = MF.getMachineMemOperand(
-        MachinePointerInfo::getFixedStack(MF, FI), Flags,
-        MF.getDataLayout().getPointerSize(), MFI.getObjectAlignment(FI));
-    MIB->addMemOperand(MF, MMO);
-
-    // Replace the instruction and update the operand index.
-    MBB->insert(MachineBasicBlock::iterator(MI), MIB);
-    OperIdx += (MIB->getNumOperands() - MI->getNumOperands()) - 1;
-    MI->eraseFromParent();
-    MI = MIB;
+  // Add frame index operands recognized by stackmaps.cpp
+  if (MFI.isStatepointSpillSlotObjectIndex(FI)) {
+    // indirect-mem-ref tag, size, #FI, offset.
+    // Used for spills inserted by StatepointLowering.  This codepath is not
+    // used for patchpoints/stackmaps at all, for these spilling is done via
+    // foldMemoryOperand callback only.
+    assert(MI->getOpcode() == TargetOpcode::STATEPOINT && "sanity");
+    MIB.addImm(StackMaps::IndirectMemRefOp);
+    MIB.addImm(MFI.getObjectSize(FI));
+    MIB.addOperand(MO);
+    MIB.addImm(0);
+  } else {
+    // direct-mem-ref tag, #FI, offset.
+    // Used by patchpoint, and direct alloca arguments to statepoints
+    MIB.addImm(StackMaps::DirectMemRefOp);
+    MIB.addOperand(MO);
+    MIB.addImm(0);
   }
-  return MBB;
+
+  // Add a new memory operand for this FI.
+  assert(MFI.getObjectOffset(FI) != -1);
+
+  unsigned Flags = MachineMemOperand::MOLoad;
+  if (MI->getOpcode() == TargetOpcode::STATEPOINT) {
+    Flags |= MachineMemOperand::MOStore;
+    Flags |= MachineMemOperand::MOVolatile;
+  }
+  MachineMemOperand *MMO = MF.getMachineMemOperand(
+      MachinePointerInfo::getFixedStack(MF, FI), Flags,
+      MF.getDataLayout().getPointerSize(), MFI.getObjectAlignment(FI));
+  MIB->addMemOperand(MF, MMO);
 }
 
 /// findRepresentativeClass - Return the largest legal super-reg register class

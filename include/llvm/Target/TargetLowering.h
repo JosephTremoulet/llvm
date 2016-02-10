@@ -50,8 +50,10 @@ namespace llvm {
   class MachineBasicBlock;
   class MachineFunction;
   class MachineInstr;
+  class MachineInstrBuilder;
   class MachineJumpTableInfo;
   class MachineLoop;
+  class MachineOperand;
   class Mangler;
   class MCContext;
   class MCExpr;
@@ -2024,10 +2026,15 @@ protected:
   /// register class are all legal.
   bool isLegalRC(const TargetRegisterClass *RC) const;
 
-  /// Replace/modify any TargetFrameIndex operands with a targte-dependent
+  /// Replace/modify any TargetFrameIndex operands with a target-dependent
   /// sequence of memory operands that is recognized by PrologEpilogInserter.
   MachineBasicBlock *emitPatchPoint(MachineInstr *MI,
                                     MachineBasicBlock *MBB) const;
+
+  /// Add the the MachineInstrBuilder the target-dependent sequence needed to
+  /// replace the given TargetFrameIndex operand and be recognized by PEI.
+  void expandPatchPointFrameIndex(MachineOperand &MO,
+                                  MachineInstrBuilder &MIB) const;
 };
 
 /// This class defines information used to lower LLVM code to legal SelectionDAG
