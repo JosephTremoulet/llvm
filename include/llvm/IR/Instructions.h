@@ -35,6 +35,7 @@ class ConstantInt;
 class ConstantRange;
 class DataLayout;
 class LLVMContext;
+template <bool> class UnwindDestIterator;
 
 enum AtomicOrdering {
   NotAtomic = 0,
@@ -3732,6 +3733,16 @@ public:
     Op<-1>() = reinterpret_cast<Value*>(B);
   }
 
+  /// getTransitiveUnwindDests - get an iterator that visits all EH pads
+  /// this invoke may reach by unwinding through its unwind edge and any
+  /// ensuing unsplittable blocks, optionally visiting the unsplittable
+  /// blocks themselves.
+  template <bool SkipUnsplittable = true>
+  iterator_range<UnwindDestIterator<SkipUnsplittable>>
+  getTransitiveUnwindDests() const {
+    return UnwindDestIterator<SkipUnsplittable>::range(getUnwindDest());
+  }
+
   /// getLandingPadInst - Get the landingpad instruction from the landing pad
   /// block (the unwind destination).
   LandingPadInst *getLandingPadInst() const;
@@ -3935,6 +3946,16 @@ public:
     assert(UnwindDest);
     assert(hasUnwindDest());
     setOperand(1, UnwindDest);
+  }
+
+  /// getTransitiveUnwindDests - get an iterator that visits all EH pads
+  /// this catchswitch may reach by unwinding through its unwind edge and any
+  /// ensuing unsplittable blocks, optionally visiting the unsplittable
+  /// blocks themselves.
+  template <bool SkipUnsplittable = true>
+  iterator_range<UnwindDestIterator<SkipUnsplittable>>
+  getTransitiveUnwindDests() const {
+    return UnwindDestIterator<SkipUnsplittable>::range(getUnwindDest());
   }
 
   /// getNumHandlers - return the number of 'handlers' in this catchswitch
@@ -4264,6 +4285,16 @@ public:
     assert(NewDest);
     assert(hasUnwindDest());
     Op<1>() = NewDest;
+  }
+
+  /// getTransitiveUnwindDests - get an iterator that visits all EH pads
+  /// this cleanupret may reach by unwinding through its unwind edge and any
+  /// ensuing unsplittable blocks, optionally visiting the unsplittable
+  /// blocks themselves.
+  template <bool SkipUnsplittable = true>
+  iterator_range<UnwindDestIterator<SkipUnsplittable>>
+  getTransitiveUnwindDests() const {
+    return UnwindDestIterator<SkipUnsplittable>::range(getUnwindDest());
   }
 
   // Methods for support type inquiry through isa, cast, and dyn_cast:
@@ -4841,6 +4872,102 @@ public:
   }
   static inline bool classof(const Value *V) {
     return isa<Instruction>(V) && classof(cast<Instruction>(V));
+  }
+};
+
+/// Iterator for visiting all EH pads that an instruction with an unwind
+/// destination may reach by unwinding through its unwind edge and any
+/// ensuing unsplittable blocks, optionally visiting the unsplittable
+/// blocks themselves.  Destinations are visited in depth-first pre-order.
+template <bool SkipUnsplittable> class UnwindDestIterator {
+  /// Construct default iterator, suitable as end() for any iteration.
+  explicit UnwindDestIterator() {}
+
+  /// Construct iterator suitable as begin() for iterating transitive
+  /// unwind dests of an instruction whose immediate unwind dest is
+  /// the given BasicBlock.
+  explicit UnwindDestIterator(BasicBlock *UnwindDest) {
+    visitUnwindDest(UnwindDest);
+  }
+
+  /// CurrentInstr is the first non-PHI of the transitive unwind dest
+  /// at the current position.
+  Instruction *CurrentInstr = nullptr;
+
+  /// If currently visiting a catchpad, CurrentHandler is the handler
+  /// iterator on the parent catchswitch referencing that catchpad.
+  /// Otherwise, CurrentHandler is None.  When visiting a catchswitch
+  /// itself, CurrentInstr is the catchswitch and CurrentHandler is None.
+  llvm::Optional<CatchSwitchInst::handler_iterator> CurrentHandler;
+
+  /// Set the iterator position to the given unwind destination, skipping
+  /// over any unsplittable blocks if SkipUnsplittable is true.
+  /// \param UnwindDest New dest to visit.  May be \p nullptr to set
+  ///                   iterator to end state.
+  void visitUnwindDest(BasicBlock *UnwindDest) {
+    assert(!CurrentHandler);
+    if (!UnwindDest) {
+      CurrentInstr = nullptr;
+      return;
+    }
+    CurrentInstr = UnwindDest->getFirstNonPHI();
+    if (SkipUnsplittable)
+      if (auto *CatchSwitch = dyn_cast<CatchSwitchInst>(CurrentInstr))
+        visitFirstHandler(CatchSwitch);
+  }
+
+  /// Begin visiting the catchpads under a catchswitch.
+  void visitFirstHandler(CatchSwitchInst *CatchSwitch) {
+    CurrentHandler = CatchSwitch->handler_begin();
+    CurrentInstr = (**CurrentHandler)->getFirstNonPHI();
+  }
+
+public:
+  BasicBlock *operator*() { return CurrentInstr->getParent(); }
+
+  UnwindDestIterator &operator++() {
+    if (CurrentHandler) {
+      CatchSwitchInst *CatchSwitch =
+          cast<CatchPadInst>(CurrentInstr)->getCatchSwitch();
+      if (++(*CurrentHandler) != CatchSwitch->handler_end()) {
+        CurrentInstr = (**CurrentHandler)->getFirstNonPHI();
+        return *this;
+      }
+      CurrentHandler.reset();
+      visitUnwindDest(CatchSwitch->getUnwindDest());
+      return *this;
+    }
+    if (auto *CatchSwitch = dyn_cast<CatchSwitchInst>(CurrentInstr)) {
+      visitFirstHandler(CatchSwitch);
+      return *this;
+    }
+    CurrentInstr = nullptr;
+    return *this;
+  }
+
+  bool operator==(const UnwindDestIterator &Other) const {
+    if (CurrentInstr != Other.CurrentInstr)
+      return false;
+    if (CurrentHandler.hasValue() != Other.CurrentHandler.hasValue())
+      return false;
+    if (CurrentHandler &&
+        (CurrentHandler.getValue() != Other.CurrentHandler.getValue()))
+      return false;
+    return true;
+  }
+
+  bool operator!=(const UnwindDestIterator &Other) const {
+    return !operator==(Other);
+  }
+
+  /// Get the iterator range for visiting transitive unwind destinations of an
+  /// instruction whose immediate unwind destination is \p UnwindDest, in
+  /// depth-first pre-order.
+  /// \param UnwindDest First uwnind destination to visit.  May be null for
+  ///                   empty iteration.
+  static iterator_range<UnwindDestIterator> range(BasicBlock *UnwindDest) {
+    return iterator_range<UnwindDestIterator>(UnwindDestIterator(UnwindDest),
+                                              UnwindDestIterator());
   }
 };
 
