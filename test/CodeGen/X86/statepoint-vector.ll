@@ -12,8 +12,8 @@ entry:
 ; CHECK: callq	do_safepoint
 ; CHECK: movaps	(%rsp), %xmm0
 ; CHECK: addq	$24, %rsp
-  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, <2 x i8 addrspace(1)*> %obj)
-  %obj.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 7, i32 7) ; (%obj, %obj)
+  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, i32 0, <2 x i8 addrspace(1)*> %obj)
+  %obj.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 8, i32 8) ; (%obj, %obj)
   ret <2 x i8 addrspace(1)*> %obj.relocated
 }
 
@@ -31,8 +31,8 @@ entry:
 ; CHECK: movaps	(%rsp), %xmm0
 ; CHECK: addq	$40, %rsp
   %derived = getelementptr i8, <2 x i8 addrspace(1)*> %obj, i64 %offset
-  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, <2 x i8 addrspace(1)*> %obj, <2 x i8 addrspace(1)*> %derived)
-  %derived.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 7, i32 8) ; (%obj, %derived)
+  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, i32 0, <2 x i8 addrspace(1)*> %obj, <2 x i8 addrspace(1)*> %derived)
+  %derived.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 8, i32 9) ; (%obj, %derived)
   ret <2 x i8 addrspace(1)*> %derived.relocated
 }
 
@@ -67,10 +67,10 @@ untaken:                                          ; preds = %entry
 merge:                                            ; preds = %untaken, %taken
   %obj.base = phi <2 x i64 addrspace(1)*> [ %obja, %taken ], [ %objb, %untaken ]
   %obj = phi <2 x i64 addrspace(1)*> [ %obja, %taken ], [ %objb, %untaken ]
-  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, <2 x i64 addrspace(1)*> %obj, <2 x i64 addrspace(1)*> %obj.base)
+  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, i32 0, <2 x i64 addrspace(1)*> %obj, <2 x i64 addrspace(1)*> %obj.base)
   %obj.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 8, i32 7) ; (%obj.base, %obj)
   %obj.relocated.casted = bitcast <2 x i8 addrspace(1)*> %obj.relocated to <2 x i64 addrspace(1)*>
-  %obj.base.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 8, i32 8) ; (%obj.base, %obj.base)
+  %obj.base.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 9, i32 9) ; (%obj.base, %obj.base)
   %obj.base.relocated.casted = bitcast <2 x i8 addrspace(1)*> %obj.base.relocated to <2 x i64 addrspace(1)*>
   ret <2 x i64 addrspace(1)*> %obj.relocated.casted
 }
@@ -86,8 +86,8 @@ entry:
 ; CHECK: callq	do_safepoint
 ; CHECK: movaps	(%rsp), %xmm0
 ; CHECK: addq	$24, %rsp
-  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, <2 x i8 addrspace(1)*> zeroinitializer)
-  %obj.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 7, i32 7) ; (%obj, %obj)
+  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0, i32 0, <2 x i8 addrspace(1)*> zeroinitializer)
+  %obj.relocated = call coldcc <2 x i8 addrspace(1)*> @llvm.experimental.gc.relocate.v2p1i8(token %safepoint_token, i32 8, i32 8) ; (%obj, %obj)
   ret <2 x i8 addrspace(1)*> %obj.relocated
 }
 
@@ -100,7 +100,7 @@ entry:
 ; CHECK: push
 ; CHECK: callq	do_safepoint
 ; CHECK: pop
-  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 1, i128 0)
+  %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 1, i128 0, i32 0)
   ret void
 }
 

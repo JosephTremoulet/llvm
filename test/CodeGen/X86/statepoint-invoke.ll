@@ -14,13 +14,13 @@ entry:
   ; CHECK: Ltmp{{[0-9]+}}:
   ; CHECK: callq some_call
   ; CHECK: Ltmp{{[0-9]+}}:
-  %0 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %obj, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i64 addrspace(1)* %obj, i64 addrspace(1)* %obj1)
+  %0 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i32 0, i64 addrspace(1)* %obj, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i64 addrspace(1)* %obj, i64 addrspace(1)* %obj1)
           to label %invoke_safepoint_normal_dest unwind label %exceptional_return
 
 invoke_safepoint_normal_dest:
   ; CHECK: movq
-  %obj.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %0, i32 13, i32 13)
-  %obj1.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %0, i32 14, i32 14)
+  %obj.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %0, i32 14, i32 14)
+  %obj1.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %0, i32 15, i32 15)
   br label %normal_return
 
 normal_return:
@@ -33,8 +33,8 @@ exceptional_return:
   ; CHECK: retq
   %landing_pad = landingpad token
           cleanup
-  %obj.relocated1 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 13, i32 13)
-  %obj1.relocated1 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 14, i32 14)
+  %obj.relocated1 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 14, i32 14)
+  %obj1.relocated1 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 15, i32 15)
   ret i64 addrspace(1)* %obj1.relocated1
 }
 ; CHECK-LABEL: GCC_except_table{{[0-9]+}}:
@@ -50,7 +50,7 @@ entry:
   ; CHECK: .Ltmp{{[0-9]+}}:
   ; CHECK: callq some_other_call
   ; CHECK: .Ltmp{{[0-9]+}}:
-  %0 = invoke token (i64, i32, i64 addrspace(1)* (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_p1i64p1i64f(i64 0, i32 0, i64 addrspace(1)* (i64 addrspace(1)*)* @some_other_call, i32 1, i32 0, i64 addrspace(1)* %obj, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i64 addrspace(1)* %obj, i64 addrspace(1)* %obj1)
+  %0 = invoke token (i64, i32, i64 addrspace(1)* (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_p1i64p1i64f(i64 0, i32 0, i64 addrspace(1)* (i64 addrspace(1)*)* @some_other_call, i32 1, i32 0, i64 addrspace(1)* %obj, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i32 0, i64 addrspace(1)* %obj, i64 addrspace(1)* %obj1)
           to label %normal_return unwind label %exceptional_return
 
 normal_return:
@@ -64,7 +64,7 @@ exceptional_return:
   ; CHECK: movq
   %landing_pad = landingpad token
           cleanup
-  %obj.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 13, i32 13)
+  %obj.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 14, i32 14)
   ret i64 addrspace(1)* %obj.relocated
 }
 ; CHECK-LABEL: GCC_except_table{{[0-9]+}}:
@@ -83,14 +83,14 @@ left:
   ; CHECK: movq %rdx, 8(%rsp)
   ; CHECK: movq
   ; CHECK: callq some_call
-  %sp1 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i64 addrspace(1)* %val1, i64 addrspace(1)* %val2)
+  %sp1 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i32 0, i64 addrspace(1)* %val1, i64 addrspace(1)* %val2)
            to label %left.relocs unwind label %exceptional_return.left
 
 left.relocs:
   ; CHECK: movq (%rsp),
   ; CHECK: movq 8(%rsp), [[REGVAL2:%[a-z]+]]
-  %val1.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 13, i32 13)
-  %val2.relocated_left = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 14, i32 14)
+  %val1.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 14, i32 14)
+  %val2.relocated_left = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 15, i32 15)
   br label %normal_return
 
 right:
@@ -98,14 +98,14 @@ right:
   ; CHECK: movq
   ; CHECK: movq %rdx, (%rsp)
   ; CHECK: callq some_call
-  %sp2 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i64 addrspace(1)* %val2, i64 addrspace(1)* %val3)
+  %sp2 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i32 0, i64 addrspace(1)* %val2, i64 addrspace(1)* %val3)
            to label %right.relocs unwind label %exceptional_return.right
 
 right.relocs:
   ; CHECK: movq (%rsp), [[REGVAL2]]
   ; CHECK: movq
-  %val2.relocated_right = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp2, i32 13, i32 13)
-  %val3.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp2, i32 14, i32 14)
+  %val2.relocated_right = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp2, i32 14, i32 14)
+  %val3.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp2, i32 15, i32 15)
   br label %normal_return
 
 normal_return:
@@ -120,13 +120,13 @@ normal_return:
 exceptional_return.left:
   %landing_pad = landingpad token
           cleanup
-  %val.relocated2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 13, i32 13)
+  %val.relocated2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 14, i32 14)
   ret i64 addrspace(1)* %val.relocated2
 
 exceptional_return.right:
   %landing_pad1 = landingpad token
           cleanup
-  %val.relocated3 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad1, i32 13, i32 13)
+  %val.relocated3 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad1, i32 14, i32 14)
   ret i64 addrspace(1)* %val.relocated3
 }
 
@@ -135,7 +135,7 @@ define i64 addrspace(1)* @test_null_undef(i64 addrspace(1)* %val1)
 ; CHECK-LABEL: test_null_undef:
 entry:
   ; CHECK: callq some_call
-  %sp1 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i64 addrspace(1)* null, i64 addrspace(1)* undef)
+  %sp1 = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i32 0, i64 addrspace(1)* null, i64 addrspace(1)* undef)
            to label %normal_return unwind label %exceptional_return
 
 normal_return:
@@ -143,15 +143,15 @@ normal_return:
   ; CHECK: xorl %eax, %eax
   ; CHECK-NEXT: popq
   ; CHECK-NEXT: retq
-  %null.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 13, i32 13)
-  %undef.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 14, i32 14)
+  %null.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 14, i32 14)
+  %undef.relocated = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %sp1, i32 15, i32 15)
   ret i64 addrspace(1)* %null.relocated
 
 exceptional_return:
   %landing_pad = landingpad token
           cleanup
-  %null.relocated2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 13, i32 13)
-  %undef.relocated2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 14, i32 14)
+  %null.relocated2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 14, i32 14)
+  %undef.relocated2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 15, i32 15)
   ret i64 addrspace(1)* %null.relocated2
 }
 
@@ -163,14 +163,14 @@ entry:
   %aa = addrspacecast i32* %a to i32 addrspace(1)*
   %c = inttoptr i64 15 to i64 addrspace(1)*
   ; CHECK: callq
-  %sp = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i32 addrspace(1)* %aa, i64 addrspace(1)* %c)
+  %sp = invoke token (i64, i32, void (i64 addrspace(1)*)*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_isVoidp1i64f(i64 0, i32 0, void (i64 addrspace(1)*)* @some_call, i32 1, i32 0, i64 addrspace(1)* %val1, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i32 0, i32 addrspace(1)* %aa, i64 addrspace(1)* %c)
            to label %normal_return unwind label %exceptional_return
 
 normal_return:
   ; CHECK: leaq
   ; CHECK-NEXT: popq
   ; CHECK-NEXT: retq
-  %aa.rel = call coldcc i32 addrspace(1)* @llvm.experimental.gc.relocate.p1i32(token %sp, i32 13, i32 13)
+  %aa.rel = call coldcc i32 addrspace(1)* @llvm.experimental.gc.relocate.p1i32(token %sp, i32 14, i32 14)
   %aa.converted = bitcast i32 addrspace(1)* %aa.rel to i64 addrspace(1)*
   ret i64 addrspace(1)* %aa.converted
 
@@ -180,7 +180,7 @@ exceptional_return:
   ; CHECK-NEXT: retq
   %landing_pad = landingpad token
           cleanup
-  %aa.rel2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 14, i32 14)
+  %aa.rel2 = call coldcc i64 addrspace(1)* @llvm.experimental.gc.relocate.p1i64(token %landing_pad, i32 15, i32 15)
   ret i64 addrspace(1)* %aa.rel2
 }
 

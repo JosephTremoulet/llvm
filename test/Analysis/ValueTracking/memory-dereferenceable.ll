@@ -38,8 +38,8 @@ entry:
     %load3 = load i32, i32 addrspace(1)* %dparam
 
 ; CHECK: %relocate{{.*}}(aligned)
-    %tok = tail call token (i64, i32, i1 ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_i1f(i64 0, i32 0, i1 ()* @return_i1, i32 0, i32 0, i32 0, i32 0, i32 addrspace(1)* %dparam)
-    %relocate = call i32 addrspace(1)* @llvm.experimental.gc.relocate.p1i32(token %tok, i32 7, i32 7)
+    %tok = tail call token (i64, i32, i1 ()*, i32, i32, ...) @llvm.experimental.gc.statepoint.p0f_i1f(i64 0, i32 0, i1 ()* @return_i1, i32 0, i32 0, i32 0, i32 0, i32 0, i32 addrspace(1)* %dparam)
+    %relocate = call i32 addrspace(1)* @llvm.experimental.gc.relocate.p1i32(token %tok, i32 8, i32 8)
     %load4 = load i32, i32 addrspace(1)* %relocate
 
 ; CHECK-NOT: %nparam
