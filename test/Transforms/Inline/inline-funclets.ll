@@ -409,20 +409,135 @@ exit:
   ret void
 }
 
+;;; Test with funclets that don't have information for themselves, but have
+;;; descendants which unwind to other descendants (left.left unwinds to
+;;; left.right, and right unwinds to far_right).  Make sure that these local
+;;; unwinds don't trip up processing of the ancestor nodes (left and root) that
+;;; ultimately have no information.
+;;; CHECK-LABEL: define void @test6(
+define void @test6() personality void()* @ProcessCLRException {
+entry:
+; CHECK-NEXT: entry:
+  invoke void @test6_inlinee()
+    to label %exit unwind label %cleanup
+cleanup:
+  %pad = cleanuppad within none []
+  call void @g() [ "funclet"(token %pad) ]
+  cleanupret from %pad unwind to caller
+exit:
+  ret void
+}
+
+define void @test6_inlinee() alwaysinline personality void ()* @ProcessCLRException {
+entry:
+  invoke void @g()
+    to label %exit unwind label %root
+    ; CHECK-NEXT:  invoke void @g()
+    ; CHECK-NEXT:    unwind label %[[root:.+]]
+root:
+  %root.pad = cleanuppad within none []
+  invoke void @g() [ "funclet"(token %root.pad) ]
+    to label %root.cont unwind label %left
+; CHECK: [[root]]:
+; CHECK-NEXT: %[[root_pad:.+]] = cleanuppad within none []
+; CHECK-NEXT: invoke void @g() [ "funclet"(token %[[root_pad]]) ]
+; CHECK-NEXT:   to label %[[root_cont:.+]] unwind label %[[left:.+]]
+
+left:
+  %left.cs = catchswitch within %root.pad [label %left.catch] unwind to caller
+; CHECK: [[left]]:
+; CHECK-NEXT: %[[left_cs:.+]] = catchswitch within %[[root_pad]] [label %[[left_catch:.+]]] unwind label %cleanup
+
+left.catch:
+  %left.cp = catchpad within %left.cs []
+  call void @g() [ "funclet"(token %left.cp) ]
+  invoke void @g() [ "funclet"(token %left.cp) ]
+    to label %unreach unwind label %left.left
+; CHECK: [[left_catch:.+]]:
+; CHECK-NEXT: %[[left_cp:.+]] = catchpad within %[[left_cs]] []
+; CHECK-NEXT: invoke void @g() [ "funclet"(token %[[left_cp]]) ]
+; CHECK-NEXT:   to label %[[lc_cont:.+]] unwind label %cleanup
+; CHECK: [[lc_cont]]:
+; CHECK-NEXT: invoke void @g() [ "funclet"(token %[[left_cp]]) ]
+; CHECK-NEXT:   to label %[[unreach:.+]] unwind label %[[left_left:.+]]
+
+left.left:
+  %ll.pad = cleanuppad within %left.cp []
+  cleanupret from %ll.pad unwind label %left.right
+; CHECK: [[left_left]]:
+; CHECK-NEXT: %[[ll_pad:.+]] = cleanuppad within %[[left_cp]] []
+; CHECK-NEXT: cleanupret from %[[ll_pad]] unwind label %[[left_right:.+]]
+
+left.right:
+  %lr.pad = cleanuppad within %left.cp []
+  unreachable
+; CHECK: [[left_right]]:
+; CHECK-NEXT: %[[lr_pad:.+]] = cleanuppad within %[[left_cp]] []
+; CHECK-NEXT: unreachable
+
+root.cont:
+  call void @g() [ "funclet"(token %root.pad) ]
+  invoke void @g() [ "funclet"(token %root.pad) ]
+    to label %unreach unwind label %right
+; CHECK: [[root_cont]]:
+; CHECK-NEXT: invoke void @g() [ "funclet"(token %[[root_pad]]) ]
+; CHECK-NEXT:   to label %[[root_cont_cont:.+]] unwind label %cleanup
+; CHECK: [[root_cont_cont]]:
+; CHECK-NEXT: invoke void @g() [ "funclet"(token %[[root_pad]]) ]
+; CHECK-NEXT:   to label %[[unreach]] unwind label %[[right:.+]]
+
+right:
+  %right.pad = cleanuppad within %root.pad []
+  invoke void @g() [ "funclet"(token %right.pad) ]
+    to label %unreach unwind label %right.child
+; CHECK: [[right]]:
+; CHECK-NEXT: %[[right_pad:.+]] = cleanuppad within %[[root_pad]] []
+; CHECK-NEXT: invoke void @g() [ "funclet"(token %[[right_pad]]) ]
+; CHECK-NEXT:   to label %[[unreach]] unwind label %[[right_child:.+]]
+
+right.child:
+  %rc.pad = cleanuppad within %right.pad []
+  invoke void @g() [ "funclet"(token %rc.pad) ]
+    to label %unreach unwind label %far_right
+; CHECK: [[right_child]]:
+; CHECK-NEXT: %[[rc_pad:.+]] = cleanuppad within %[[right_pad]] []
+; CHECK-NEXT: invoke void @g() [ "funclet"(token %[[rc_pad]]) ]
+; CHECK-NEXT:   to label %[[unreach]] unwind label %[[far_right:.+]]
+
+far_right:
+  %fr.cs = catchswitch within %root.pad [label %fr.catch] unwind to caller
+; CHECK: [[far_right]]:
+; CHECK-NEXT: %[[fr_cs:.+]] = catchswitch within %[[root_pad]] [label %[[fr_catch:.+]]] unwind label %cleanup
+
+fr.catch:
+  %fr.cp = catchpad within %fr.cs []
+  unreachable
+; CHECK: [[fr_catch]]:
+; CHECK-NEXT: %[[fr_cp:.+]] = catchpad within %[[fr_cs]] []
+; CHECK-NEXT: unreachable
+
+unreach:
+  unreachable
+; CHECK: [[unreach]]:
+; CHECK-NEXT: unreachable
+
+exit:
+  ret void
+}
 
 declare void @ProcessCLRException()
 
 ; Make sure the logic doesn't get tripped up when the inlined invoke is
 ; itself within a funclet in the caller.
-; CHECK-LABEL: define void @test6(
-define void @test6() personality void ()* @ProcessCLRException {
+; CHECK-LABEL: define void @test7(
+define void @test7() personality void ()* @ProcessCLRException {
 entry:
   invoke void @g()
     to label %exit unwind label %callsite_parent
 callsite_parent:
   %callsite_parent.pad = cleanuppad within none []
 ; CHECK: %callsite_parent.pad = cleanuppad within none
-  invoke void @test6_inlinee() [ "funclet"(token %callsite_parent.pad) ]
+  invoke void @test7_inlinee() [ "funclet"(token %callsite_parent.pad) ]
     to label %ret unwind label %cleanup
 ret:
   cleanupret from %callsite_parent.pad unwind label %cleanup
@@ -434,7 +549,7 @@ exit:
   ret void
 }
 
-define void @test6_inlinee() alwaysinline personality void ()* @ProcessCLRException {
+define void @test7_inlinee() alwaysinline personality void ()* @ProcessCLRException {
 entry:
   invoke void @g()
     to label %exit unwind label %inlinee_cleanup
