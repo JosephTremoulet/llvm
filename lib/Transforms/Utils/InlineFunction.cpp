@@ -410,7 +410,7 @@ static Value *getUnwindDestToken(Instruction *EHPad,
   // and since any time it finds information it records it in the MemoMap for
   // not just the immediately-containing funclet but also any ancestors also
   // exited, it must be the case that, walking downward from LastUselessPad,
-  // visiting just those nodes which have not been mapped to an unwind desti
+  // visiting just those nodes which have not been mapped to an unwind dest
   // by getUnwindDestTokenHelper (the nullptr TempMemos notwithstanding, since
   // they are just used to keep getUnwindDestTokenHelper from repeating work),
   // any node visited must have been exhaustively searched with no information
