@@ -420,15 +420,14 @@ static Value *getUnwindDestToken(Instruction *EHPad,
     Instruction *UselessPad = Worklist.pop_back_val();
     auto Memo = MemoMap.find(UselessPad);
     if (Memo != MemoMap.end() && Memo->second) {
-      // EHPad must have a descendant that unwinds to a different descendant
-      // of EHPad.  This local unwind gives us no information about EHPad.
-      // Leave it and the subtree rooted at it alone.
-#ifndef NDEBUG
-      auto *UnwindAncestor = getParentPad(Memo->second);
-      while (UnwindAncestor && UnwindAncestor != EHPad)
-        UnwindAncestor = getParentPad(UnwindAncestor);
-      assert(UnwindAncestor == EHPad);
-#endif
+      // Here the name 'UselessPad' is a bit of a misnomer, because we've found
+      // that it is a funclet that does have information about unwinding to
+      // a particular destination; its parent was a useless pad.
+      // Since its parent has no information, the unwind edge must not escape
+      // the parent, and must target a sibling of this pad.  This local unwind
+      // gives us no information about EHPad.  Leave it and the subtree rooted
+      // at it alone.
+      assert(getParentPad(Memo->second) == getParentPad(UselessPad));
       continue;
     }
     // We know we don't have information for UselesPad.  If it has an entry in
